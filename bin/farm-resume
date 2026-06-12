@@ -126,11 +126,46 @@ def scan(since_hours):
     return out
 
 
-def resume_cmd(tool, cwd, sid):
+def _codex_model_effort(path):
+    """Last model + reasoning effort the codex session actually used.
+
+    codex writes a `turn_context` record each turn carrying `model` and
+    `reasoning_effort`. We take the LAST one so a mid-session `/model` switch is
+    honoured. Plain `codex resume` ignores these and falls back to the config
+    default (medium), which is why resumed panes lost their model/thinking.
+    """
+    model = effort = None
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                if '"turn_context"' not in line:  # cheap pre-filter; skip big lines
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if o.get("type") != "turn_context":
+                    continue
+                p = o.get("payload", o)
+                model = p.get("model") or model
+                effort = p.get("reasoning_effort") or p.get("effort") or effort
+    except OSError:
+        pass
+    return model, effort
+
+
+def resume_cmd(tool, cwd, sid, path=None):
     short = cwd.replace(HOME, "~")
     if tool == "claude":
         return f"cd {short} && claude --resume {sid}"
-    return f"cd {short} && codex resume {sid}"
+    cmd = f"cd {short} && codex resume {sid}"
+    if path:
+        model, effort = _codex_model_effort(path)
+        if model:
+            cmd += f' -c model="{model}"'
+        if effort:
+            cmd += f' -c model_reasoning_effort="{effort}"'
+    return cmd
 
 
 def tmux(*args):
@@ -179,7 +214,7 @@ def main():
         if as_json:
             print(json.dumps([
                 {"mtime": m, "tool": t, "cwd": c, "session": s, "task": tk,
-                 "cmd": resume_cmd(t, c, s)}
+                 "cmd": resume_cmd(t, c, s, _p)}
                 for (m, t, c, s, tk, _p) in sessions], indent=2))
             return 0
         print(f"Recent resumable sessions (last {since:g}h, newest per project):\n")
@@ -189,7 +224,7 @@ def main():
             print(f"  {tag}  {c.replace(HOME, '~'):<34}  {ago:4.1f}h ago")
             if tk:
                 print(f"           ↳ {tk}")
-            print(f"           {resume_cmd(t, c, s)}\n")
+            print(f"           {resume_cmd(t, c, s, _p)}\n")
         print("Bring them back:  farm-resume stage   (type, you hit Enter)")
         print("              or:  farm-resume go      (launch now)")
         return 0
@@ -204,14 +239,14 @@ def main():
         print(f"farm-resume: no free panes in '{session}' "
               f"(all panes busy). Sessions to resume manually:\n")
         for (m, t, c, s, tk, _p) in sessions:
-            print("  " + resume_cmd(t, c, s))
+            print("  " + resume_cmd(t, c, s, _p))
         return 1
 
     n = min(len(panes), len(sessions))
     for i in range(n):
         pane = panes[i]
         (_m, t, c, s, _tk, _p) = sessions[i]
-        cmd = resume_cmd(t, c, s)
+        cmd = resume_cmd(t, c, s, _p)
         tmux("send-keys", "-t", f"{session}:{pane}", "-l", cmd)
         if mode == "go":
             tmux("send-keys", "-t", f"{session}:{pane}", "Enter")
@@ -220,7 +255,7 @@ def main():
     if len(sessions) > n:
         print(f"\n{len(sessions) - n} more session(s) — not enough free panes:")
         for (m, t, c, s, tk, _p) in sessions[n:]:
-            print("  " + resume_cmd(t, c, s))
+            print("  " + resume_cmd(t, c, s, _p))
     if mode == "stage":
         print("\nReview each pane, then hit Enter to launch.")
     return 0
