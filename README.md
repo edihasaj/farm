@@ -36,7 +36,9 @@ shipyard <repo> <task>
 | `bin/farm-risk-snapshot` | throttled safety snapshot before copy-mode entry, keeping mouse copy UX while making tmux crashes recoverable |
 | `bin/farm-queue` | file-based task queue (`queue/pending→running→done\|failed`); tasks carry their repo, so one queue feeds many projects |
 | `bin/farm-loop` | agent loop: drains the queue through `shipyard -p`; run one per pane for parallel workers |
+| `bin/farm-schedule` | cron wrapper: runs `farm-loop --drain` on an interval so the backlog empties unattended (overlap-locked, logged) |
 | `tests/test-farm-loop.sh` | queue + loop test suite (stubbed shipyard; covers claims, failure, retry, concurrency, interrupt) |
+| `tests/test-farm-schedule.sh` | scheduler test suite (line generation, drain, overlap lock — never touches the real crontab) |
 | `config/tmux.conf` | tmux config for the farm (Ghostty-tuned: native mouse copy, kitty keys, even grids) |
 | `hooks/` | optional always-on checks (e.g. security scan on diff) |
 
@@ -107,7 +109,25 @@ mid-task requeues the in-flight task. The loop prepends `farm/bin` and
 `farm-loop` calls `shipyard -p` by default. Override with `FARM_LOOP_SHIP` only
 for tests or temporary experiments. Agent/model selection lives in shipyard.
 
-Tests: `tests/test-farm-loop.sh` (no real agents; `shipyard` is stubbed).
+### Unattended (scheduled drain)
+
+Let cron empty the backlog for you — queue all day, ship on a timer:
+
+```sh
+farm-schedule install --interval 30   # cron: farm-loop --drain every 30 min
+farm-schedule status                  # show the entry + recent run log
+farm-schedule remove                  # unschedule
+farm-schedule run                     # one drain now (what cron calls)
+```
+
+`run` takes an atomic lock so a slow drain never overlaps the next tick, and
+sets a sane PATH (cron's is bare) so `shipyard`/`farm-loop` resolve. Output
+appends to `queue/logs/scheduler.log`. The crontab entry is tagged with a
+`# farm-schedule` marker, so install/remove are idempotent and leave your other
+cron lines untouched.
+
+Tests: `tests/test-farm-loop.sh` + `tests/test-farm-schedule.sh` (no real
+agents; `shipyard` is stubbed, the real crontab is never touched).
 
 ## Push policy (the safety rail)
 
@@ -118,5 +138,5 @@ Tests: `tests/test-farm-loop.sh` (no real agents; `shipyard` is stubbed).
 
 1. Hook: security scan on every diff (wire `hooks/security-scan.sh`).
 2. ✅ Queue + agent loop: `farm-queue` backlog drained by `farm-loop` workers.
-3. Scheduled farm: cron runs `farm-loop --drain` to empty the backlog unattended.
+3. ✅ Scheduled farm: `farm-schedule` cron-drains the backlog unattended.
 4. Graph DB of tasks/PRs/agents ("grafiti graph").

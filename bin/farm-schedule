@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# farm-schedule — run `farm-loop --drain` on a cron schedule so the queue
+# empties unattended. You keep doing `farm-queue add …`; this ships them.
+#
+# usage:
+#   farm-schedule install [--interval MIN]   # add/replace the crontab entry (default 30)
+#   farm-schedule status                      # show the entry + recent run log
+#   farm-schedule remove                      # delete the crontab entry
+#   farm-schedule run                         # one drain now (what cron calls); locked + logged
+#   farm-schedule line [--interval MIN]       # print the crontab line (no install)
+#
+# env:
+#   FARM_HOME            queue root (default ~/Projects/farm)
+#   FARM_SCHEDULE_PATH   PATH used by `run` (cron's PATH is bare); sensible default below
+#
+# The cron entry is tagged with a marker comment so install/remove are
+# idempotent and never touch your other crontab lines.
+set -uo pipefail
+
+FARM="${FARM_HOME:-$HOME/Projects/farm}"
+BIN="$(cd "$(dirname "$0")" && pwd)"
+SELF="$BIN/farm-schedule"
+Q="$FARM/queue"
+LOG="$Q/logs/scheduler.log"
+LOCK="$Q/.scheduler.lock"
+MARKER="# farm-schedule"
+mkdir -p "$Q/logs"
+
+die() { echo "farm-schedule: $*" >&2; exit 1; }
+usage() { sed -n '2,21p' "$0"; exit "${1:-0}"; }
+
+# parse "[--interval N]" from the remaining args -> echoes minutes (default 30)
+parse_interval() {
+  local mins=30
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval) shift; mins="${1:?--interval needs minutes}" ;;
+      --interval=*) mins="${1#--interval=}" ;;
+      *) die "unknown arg: $1" ;;
+    esac
+    shift
+  done
+  [[ "$mins" =~ ^[0-9]+$ ]] && [ "$mins" -ge 1 ] && [ "$mins" -le 59 ] \
+    || die "interval must be 1..59 minutes (got: $mins)"
+  echo "$mins"
+}
+
+crontab_line() {
+  local mins; mins="$(parse_interval "$@")" || exit 1
+  echo "*/$mins * * * * $SELF run >> $LOG 2>&1 $MARKER"
+}
+
+install() {
+  local line; line="$(crontab_line "$@")" || exit 1
+  # keep every other line; drop any prior farm-schedule entry; append the new one
+  { crontab -l 2>/dev/null | grep -vF "$MARKER"; echo "$line"; } | crontab - \
+    || die "could not write crontab"
+  echo "installed: $line"
+  echo "log: $LOG"
+}
+
+remove() {
+  local cur; cur="$(crontab -l 2>/dev/null || true)"
+  if ! printf '%s\n' "$cur" | grep -qF "$MARKER"; then
+    echo "farm-schedule: no entry installed"; return 0
+  fi
+  printf '%s\n' "$cur" | grep -vF "$MARKER" | crontab - || die "could not write crontab"
+  echo "removed farm-schedule entry"
+}
+
+status() {
+  local line; line="$(crontab -l 2>/dev/null | grep -F "$MARKER" || true)"
+  if [ -n "$line" ]; then echo "scheduled: $line"; else echo "not scheduled (farm-schedule install)"; fi
+  echo "queue: $("$BIN/farm-queue" 2>/dev/null | sed -n '2p')"
+  if [ -f "$LOG" ]; then echo "— recent runs ($LOG) —"; tail -8 "$LOG"; fi
+}
+
+# run — one drain, guarded so a slow drain never overlaps the next cron tick.
+# The mkdir lock is atomic; a stale lock (process died) is cleared on next tick.
+run() {
+  export PATH="${FARM_SCHEDULE_PATH:-$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$BIN:$HOME/Projects/agent-scripts/bin:/usr/bin:/bin}"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] skip: a drain is already running"
+    return 0
+  fi
+  trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] drain start"
+  "$BIN/farm-loop" --drain
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] drain end (rc=$?)"
+}
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  install) install "$@" ;;
+  remove|uninstall) remove ;;
+  status) status ;;
+  run)    run ;;
+  line)   crontab_line "$@" ;;
+  -h|--help) usage 0 ;;
+  *) die "unknown command: $cmd (try --help)" ;;
+esac
