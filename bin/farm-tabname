@@ -6,12 +6,18 @@
 path="$1"; pane="$2"
 [[ -n "$path" && -n "$pane" ]] || exit 0
 
+cached_path="$(tmux display-message -p -t "$pane" '#{@proj_path}' 2>/dev/null || true)"
+if [[ "$cached_path" == "$path" ]]; then
+  exit 0
+fi
+
 if root=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null); then
-  name=$(basename "$root")
+  name="${root##*/}"
 else
-  parent=$(basename "$(dirname "$path")")
-  name="$parent/$(basename "$path")"
+  parent="${path%/*}"
+  name="${parent##*/}/${path##*/}"
 fi
 
 # store in a custom pane option (p10k clobbers pane_title, but never @proj)
 tmux set-option -p -t "$pane" @proj "$name" 2>/dev/null
+tmux set-option -p -t "$pane" @proj_path "$path" 2>/dev/null
