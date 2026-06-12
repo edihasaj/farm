@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# farm-view <N> [session] [dir] — arrange the farm into TABS of N panes (pool=32),
+# each tab an even grid via farm-layout (cols x 2 rows for >=4, else single row).
+#
+#   farm-view 8 -> 4 tabs x 8 (4x2)     farm-view 4 -> 8 tabs x 4 (2x2)
+#   farm-view 6 -> 6 tabs (5x6 + 1x2)   farm-view 2 -> 16 tabs x 2
+#
+# Idle session (only shells)  -> rebuilt into the full tab set, exact grids.
+# Busy session (an agent runs) -> NEVER kills; each existing window is rearranged
+# into an even grid sized to its current pane count (via farm-layout = move/resize).
+per="${1:-8}"
+sess="${2:-$(tmux display-message -p '#{session_name}' 2>/dev/null)}"
+dir="${3:-$HOME/Projects}"
+TOTAL=32
+LAYOUT=~/.local/bin/farm-layout
+[[ -n "$sess" ]] || { echo "farm-view: no session" >&2; exit 1; }
+(( per >= 1 )) || per=8
+
+is_idle() {   # true if NO pane anywhere in the session runs a non-shell
+  ! tmux list-panes -s -t "$sess" -F '#{pane_current_command}' \
+    | grep -qvE '^(zsh|-zsh|bash|-bash|sh|login|fish)$'
+}
+
+# apply an even grid to window $1 holding exactly $2 panes (rearrange, never kill)
+grid_window() {
+  local win="$1" n="$2" W H lay
+  (( n >= 2 )) || return
+  W=$(tmux display -p -t "$win" '#{window_width}')
+  H=$(tmux display -p -t "$win" '#{window_height}')
+  lay=$("$LAYOUT" "$W" "$H" "$n" "$per" 2>/dev/null)
+  if [ -n "$lay" ]; then
+    tmux select-layout -t "$win" "$lay" >/dev/null 2>&1 || tmux select-layout -t "$win" tiled >/dev/null 2>&1
+  else
+    tmux select-layout -t "$win" tiled >/dev/null 2>&1
+  fi
+}
+
+# repack: consolidate ALL panes of $sess into ceil(N/per) tabs of `per`, preserving every
+# pane's PROCESS (break/move/swap — zero kills) and the L1..Ln order, then grid each tab.
+# This is the cross-tab "rearrange like before" for BUSY sessions (agents keep running).
+# Panes are addressed by stable #{pane_id}, so emptied source windows auto-vanish safely.
+repack() {
+  local ids N T g start end f wid i ti pos want win cur
+  ids=($(tmux list-panes -s -t "$sess" -F '#{window_index}.#{pane_index} #{pane_id}' \
+        | sort -t. -k1,1n -k2,2n | awk '{print $2}'))
+  N=${#ids[@]}; (( N > 0 )) || return
+  T=$(( (N + per - 1) / per ))
+  # 1) group: break each tab's first pane into a fresh window, move the rest in (re-tile
+  #    after each move so the next split always has room — avoids "pane too small")
+  for ((g = 0; g < T; g++)); do
+    start=$(( g * per )); end=$(( start + per )); (( end > N )) && end=$N
+    f="${ids[start]}"
+    wid=$(tmux break-pane -d -s "$f" -P -F '#{window_id}')
+    for ((i = start + 1; i < end; i++)); do
+      tmux move-pane -d -s "${ids[i]}" -t "$f"
+      tmux select-layout -t "$wid" tiled >/dev/null 2>&1
+    done
+  done
+  # 2) order the tabs by group (park at temp indices, then renumber to close gaps)
+  ti=90
+  for ((g = 0; g < T; g++)); do
+    win=$(tmux display -p -t "${ids[g * per]}" '#{window_id}')
+    tmux move-window -s "$win" -t "$sess:$ti" >/dev/null 2>&1
+    ti=$(( ti + 1 ))
+  done
+  tmux move-window -r -t "$sess" >/dev/null 2>&1
+  # 3) order panes within each tab to L1..Ln (selection sort via swap-pane), then grid
+  for ((g = 0; g < T; g++)); do
+    start=$(( g * per )); end=$(( start + per )); (( end > N )) && end=$N
+    for ((pos = 0; pos < end - start; pos++)); do
+      want="${ids[start + pos]}"
+      win=$(tmux display -p -t "$want" '#{window_id}')
+      cur=$(tmux list-panes -t "$win" -F '#{pane_index} #{pane_id}' | sort -n | awk -v p=$pos 'NR==p+1{print $2}')
+      [ "$cur" = "$want" ] || tmux swap-pane -d -s "$want" -t "$cur"
+    done
+    wid=$(tmux display -p -t "${ids[start]}" '#{window_id}')
+    grid_window "$wid" $(( end - start ))
+  done
+}
+
+if is_idle "$sess"; then
+  # full rebuild: collapse to one window/one pane, then build `tabs` windows of `per`
+  first=$(tmux list-windows -t "$sess" -F '#{window_id}' | head -1)
+  for w in $(tmux list-windows -t "$sess" -F '#{window_id}' | tail -n +2); do
+    tmux kill-window -t "$w" 2>/dev/null
+  done
+  tmux list-panes -t "$first" -F '#{pane_id}' | tail -n +2 | while read -r p; do
+    tmux kill-pane -t "$p" 2>/dev/null
+  done
+  tabs=$(( (TOTAL + per - 1) / per ))           # ceil(32/per)
+  remaining=$TOTAL
+  for ((t = 1; t <= tabs; t++)); do
+    n=$(( remaining < per ? remaining : per ))
+    if (( t == 1 )); then win="$first"
+    else win=$(tmux new-window -d -t "$sess" -c "$dir" -P -F '#{window_id}'); fi
+    # grow window to n panes, then grid it
+    for ((i = 1; i < n; i++)); do tmux split-window -t "$win" -c "$dir" 2>/dev/null; tmux select-layout -t "$win" tiled >/dev/null 2>&1; done
+    grid_window "$win" "$n"
+    (( remaining -= n ))
+  done
+else
+  # busy: agents are running -> NEVER kill. Consolidate every pane into ceil(total/per)
+  # tabs of `per` (cross-tab repack), keeping each process and the L1..Ln order intact.
+  repack
+fi
+
+# name tabs F1..Fn + label panes by project
+n=1
+for wid in $(tmux list-windows -t "$sess" -F '#{window_id}'); do
+  tmux rename-window -t "$wid" "F$n"; (( n++ ))
+  while read -r pid pp; do
+    ~/.local/bin/farm-tabname "$pp" "$pid" 2>/dev/null
+  done < <(tmux list-panes -t "$wid" -F '#{pane_id} #{pane_current_path}')
+done

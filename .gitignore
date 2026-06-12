@@ -1,0 +1,10 @@
+.DS_Store
+.mcp.json
+*.log
+/tmp/
+__pycache__/
+*.pyc
+browser/chrome-profile/
+queue/
+repos/
+sandbox/

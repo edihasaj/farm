@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# farm-loop — agent loop: drain the farm-queue by running each task through
+# shipyard (headless/print mode). Run it in a farm pane; run several
+# panes for parallel workers — the queue's mv-claims keep them from colliding.
+#
+# usage:
+#   farm-loop              # watch mode: poll forever (sleep $FARM_LOOP_INTERVAL)
+#   farm-loop --drain      # process until the queue is empty, then exit
+#   farm-loop --once       # process at most one task, then exit
+#   farm-loop --interval N # poll seconds in watch mode (default 15)
+#
+# env:
+#   FARM_HOME           queue + repo configs root (default ~/Projects/farm)
+#   FARM_LOOP_SHIP      shipyard binary override (tests stub this)
+#   FARM_LOOP_INTERVAL  watch-mode poll seconds (default 15)
+#
+# Each task logs to queue/logs/<id>.log; exit 0 -> done/, else failed/.
+# Ctrl-C mid-task requeues the current task to pending/ before exiting.
+set -uo pipefail
+
+FARM="${FARM_HOME:-$HOME/Projects/farm}"
+BIN="$(cd "$(dirname "$0")" && pwd)"
+# headless/cron contexts may lack the interactive PATH; the spawned agent needs
+# farm + agent-scripts tooling on it
+export PATH="$BIN:$HOME/Projects/agent-scripts/bin:$PATH"
+
+QCMD="$BIN/farm-queue"
+SHIP="${FARM_LOOP_SHIP:-shipyard}"
+Q="$FARM/queue"
+INTERVAL="${FARM_LOOP_INTERVAL:-15}"
+MODE=watch
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --drain) MODE=drain ;;
+    --once)  MODE=once ;;
+    --interval) shift; INTERVAL="${1:?--interval needs seconds}" ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    *) echo "farm-loop: unknown arg: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+field() { sed -n "s/^$2: //p" "$1" | head -1; }
+
+CURRENT=""
+requeue_current() {
+  if [ -n "$CURRENT" ]; then
+    mv "$Q/running/$CURRENT.task" "$Q/pending/$CURRENT.task" 2>/dev/null || true
+    echo "farm-loop: interrupted — requeued $CURRENT" >&2
+  fi
+  exit 130
+}
+trap requeue_current INT TERM
+
+N_DONE=0 N_FAIL=0
+
+run_task() {
+  local id="$1" f="$Q/running/$id.task" log="$Q/logs/$id.log"
+  local repo task notes rc
+  repo="$(field "$f" repo)"; task="$(field "$f" task)"; notes="$(field "$f" notes)"
+  echo "▶ $id  repo=${repo:-<url>}  task=$task"
+
+  # notes intentionally unquoted: they are extra words after the task, same as
+  # `shipyard <repo> <task> [notes…]` on the command line
+  if [ -n "$repo" ]; then
+    "$SHIP" -p "$repo" "$task" ${notes:+$notes} >>"$log" 2>&1
+  else
+    "$SHIP" -p "$task" ${notes:+$notes} >>"$log" 2>&1
+  fi
+  rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    "$QCMD" done "$id"; N_DONE=$((N_DONE + 1))
+    echo "✔ $id done  (log: $log)"
+  else
+    "$QCMD" fail "$id"; N_FAIL=$((N_FAIL + 1))
+    echo "✘ $id failed rc=$rc  (log: $log)" >&2
+    tail -5 "$log" 2>/dev/null | sed 's/^/  │ /' >&2
+  fi
+}
+
+echo "farm-loop: mode=$MODE  queue=$Q  ship=$SHIP"
+while :; do
+  id="$("$QCMD" next 2>/dev/null || true)"
+  if [ -z "$id" ]; then
+    case "$MODE" in drain|once) break ;; esac
+    sleep "$INTERVAL"
+    continue
+  fi
+  CURRENT="$id"
+  run_task "$id"
+  CURRENT=""
+  [ "$MODE" = once ] && break
+done
+
+echo "farm-loop: exiting  done=$N_DONE failed=$N_FAIL"
+[ "$N_FAIL" -eq 0 ]

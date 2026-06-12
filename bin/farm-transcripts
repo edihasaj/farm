@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# farm-transcripts — see the FULL Claude/Codex conversations (the complete record,
+# not the truncated terminal scrollback that farm-snapshot captures).
+#
+#   farm-transcripts list [N]        recent sessions (default 20), newest first:
+#                                    index | when | agent | project | first user msg
+#   farm-transcripts show <index>    print that session as readable [user]/[assistant]
+#   farm-transcripts show <index> --full   include tool calls / longer text
+#   farm-transcripts path <index>    print the .jsonl path
+#
+# Sources: ~/.claude/projects/*/*.jsonl  and  ~/.codex/**/ *.jsonl
+set -uo pipefail
+
+CLAUDE_DIR="$HOME/.claude/projects"
+CODEX_DIR="$HOME/.codex"
+CACHE="$HOME/.cache/farm-transcripts.idx"
+mkdir -p "$(dirname "$CACHE")"
+
+build_index() {  # newest-first list of jsonl files -> cache: path<TAB>mtime
+  { find "$CLAUDE_DIR" -name '*.jsonl' -type f 2>/dev/null
+    find "$CODEX_DIR" -name '*.jsonl' -type f 2>/dev/null
+  } | while read -r f; do
+        printf '%s\t%s\n' "$(stat -f '%m' "$f" 2>/dev/null)" "$f"
+      done | sort -rn > "$CACHE"
+}
+
+path_for() {  # $1 = 1-based index
+  sed -n "${1}p" "$CACHE" | cut -f2
+}
+
+agent_of() { case "$1" in *"/.codex/"*) echo codex ;; *) echo claude ;; esac; }
+proj_of()  { # derive a project label from the path
+  case "$1" in
+    *"/.claude/projects/"*) basename "$(dirname "$1")" | sed 's/^-Users-[^-]*-Projects-//; s/-/\//g' ;;
+    *) basename "$(dirname "$1")" ;;
+  esac
+}
+
+cmd="${1:-list}"
+case "$cmd" in
+  list|ls)
+    build_index
+    n="${2:-20}"; i=1
+    while IFS=$'\t' read -r mt f; do
+      [ "$i" -gt "$n" ] && break
+      when=$(date -r "$mt" '+%m-%d %H:%M' 2>/dev/null)
+      ag=$(agent_of "$f"); pj=$(proj_of "$f")
+      first=$(python3 - "$f" <<'PY' 2>/dev/null
+import sys,json
+for ln in open(sys.argv[1],errors="ignore"):
+    try:o=json.loads(ln)
+    except:continue
+    if o.get("type")=="user":
+        c=(o.get("message",{}) or {}).get("content")
+        tx=" ".join(x.get("text","") for x in c if isinstance(x,dict) and x.get("type")=="text") if isinstance(c,list) else (c if isinstance(c,str) else "")
+        tx=tx.strip().replace("\n"," ")
+        if tx and not tx.startswith("<"):
+            print(tx[:60]); break
+PY
+)
+      printf '%2d) %s  %-6s %-22s %s\n' "$i" "$when" "$ag" "$pj" "$first"
+      i=$((i+1))
+    done < "$CACHE"
+    [ -s "$CACHE" ] || echo "(no transcripts found)"
+    ;;
+  show|cat)
+    [ -s "$CACHE" ] || build_index
+    idx="${2:-1}"; full=""; [ "${3:-}" = "--full" ] && full=1
+    f=$(path_for "$idx")
+    [ -n "$f" ] && [ -f "$f" ] || { echo "no transcript $idx (try: farm-transcripts list)"; exit 1; }
+    echo "# $(agent_of "$f") · $(proj_of "$f") · $f"; echo
+    FULL="$full" python3 - "$f" <<'PY'
+import sys,json,os
+full=os.environ.get("FULL")
+for ln in open(sys.argv[1],errors="ignore"):
+    try:o=json.loads(ln)
+    except:continue
+    t=o.get("type")
+    if t not in ("user","assistant"): continue
+    c=(o.get("message",{}) or {}).get("content")
+    tx=" ".join(x.get("text","") for x in c if isinstance(x,dict) and x.get("type")=="text") if isinstance(c,list) else (c if isinstance(c,str) else "")
+    tx=tx.strip()
+    if not tx or tx.startswith("<"): continue
+    if not full and len(tx)>500: tx=tx[:500]+" …"
+    print(f"\n=== {t.upper()} ===\n{tx}")
+PY
+    ;;
+  path)
+    [ -s "$CACHE" ] || build_index
+    f=$(path_for "${2:-1}"); [ -n "$f" ] && echo "$f" || echo "no transcript ${2:-1}"
+    ;;
+  -h|--help) sed -n '2,14p' "$0" ;;
+  *) echo "usage: farm-transcripts {list [N] | show <i> [--full] | path <i>}"; exit 1 ;;
+esac

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# farm-reflow — adapt a farm session's grid to the current client width.
+# Triggered by tmux's client-resized hook, so moving the window to a bigger
+# screen reshapes the grid with no restart.
+#
+# Rules (safe by design):
+#   - idle tab (every pane is just a shell)  -> rebuild a clean even COLSx2 grid
+#   - busy tab that needs MORE panes         -> add panes only (never kills agents)
+#   - busy tab that has too many             -> left alone (won't kill agents)
+# Only acts on sessions tagged `@farm 1`.
+
+WIDE_THRESHOLD=280     # client columns >= this -> wide grid (8); else 6. Tune to taste.
+
+lock=/tmp/farm-reflow.lock
+mkdir "$lock" 2>/dev/null || exit 0          # debounce: one run at a time
+trap 'rmdir "$lock" 2>/dev/null' EXIT
+
+sess=$(tmux display-message -p '#{session_name}' 2>/dev/null) || exit 0
+[[ "$(tmux show-options -v -t "$sess" @farm 2>/dev/null)" == "1" ]] || exit 0
+
+w=$(tmux list-clients -t "$sess" -F '#{client_width}' 2>/dev/null | sort -nr | head -1)
+[[ -n "$w" ]] || exit 0
+if (( w >= WIDE_THRESHOLD )); then cols=4; else cols=3; fi
+target=$(( cols * 2 ))
+
+is_idle() {   # true if no pane in window $1 is running anything but a shell
+  ! tmux list-panes -t "$1" -F '#{pane_current_command}' \
+    | grep -qvE '^(zsh|-zsh|bash|-bash|sh|login)$'
+}
+
+build_even() {   # rebuild window $1 into a clean cols x 2 grid (idle only)
+  local win="$1" dir pid i
+  dir=$(tmux display-message -p -t "$win" '#{pane_current_path}')
+  tmux list-panes -t "$win" -F '#{pane_id}' | tail -n +2 | while read -r pid; do
+    tmux kill-pane -t "$pid" 2>/dev/null
+  done
+  for ((i = 1; i < cols; i++)); do tmux split-window -h -t "$win" -c "$dir" 2>/dev/null; done
+  tmux select-layout -t "$win" even-horizontal >/dev/null 2>&1
+  while read -r pid; do
+    tmux split-window -v -t "$pid" -c "$dir" 2>/dev/null
+  done < <(tmux list-panes -t "$win" -F '#{pane_id}')
+}
+
+while read -r win; do
+  have=$(tmux list-panes -t "$win" 2>/dev/null | wc -l | tr -d ' ')
+  (( have == target )) && continue
+  if is_idle "$win"; then
+    build_even "$win"
+  elif (( have < target )); then
+    dir=$(tmux display-message -p -t "$win" '#{pane_current_path}')
+    while (( have < target )); do
+      tmux split-window -t "$win" -c "$dir" 2>/dev/null || break
+      tmux select-layout -t "$win" tiled >/dev/null 2>&1
+      have=$(( have + 1 ))
+    done
+  fi
+done < <(tmux list-windows -t "$sess" -F '#{session_name}:#{window_index}')

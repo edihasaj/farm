@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""farm-layout W H N PER -> a tmux layout string for N panes arranged in rows of
+up to (PER/2 .. PER) columns x 2 rows (PER==4 -> 2 cols; even PER>=6 -> PER/2 cols;
+else a single row). Pure geometry: tmux applies the existing panes to the cells in
+order, so this REARRANGES panes (move/resize) without killing any.
+
+Usage: farm-layout <win_width> <win_height> <n_panes> <per>
+Prints: <checksum>,<layout>   (feed to: tmux select-layout "<that>")
+"""
+import sys
+
+def checksum(s: str) -> str:
+    c = 0
+    for ch in s:
+        c = ((c >> 1) + ((c & 1) << 15)) & 0xFFFF
+        c = (c + ord(ch)) & 0xFFFF
+    return "%04x" % c
+
+def cols_for(per: int) -> int:
+    if per == 4:               return 2
+    if per >= 6 and per % 2 == 0: return per // 2
+    return per  # single row (2,3,5,7,...)
+
+def split_sizes(total: int, parts: int) -> list:
+    """split `total` cells across `parts`, minus (parts-1) dividers, distribute remainder."""
+    avail = total - (parts - 1)            # 1 cell per divider between parts
+    base, rem = divmod(avail, parts)
+    return [base + (1 if i < rem else 0) for i in range(parts)]
+
+def build(W: int, H: int, n: int, per: int) -> str:
+    cols = min(cols_for(per), n)
+    rows = (n + cols - 1) // cols          # ceil(n/cols)
+    # panes per row, row-major: fill `cols` until panes run out
+    row_counts = []
+    left = n
+    for _ in range(rows):
+        rc = min(cols, left); row_counts.append(rc); left -= rc
+    row_h = split_sizes(H, rows)
+
+    idx = 0
+    y = 0
+    rows_str = []
+    for r in range(rows):
+        rh = row_h[r]; rc = row_counts[r]
+        col_w = split_sizes(W, rc)
+        x = 0
+        leaves = []
+        for cw in col_w:
+            leaves.append("%dx%d,%d,%d,%d" % (cw, rh, x, y, idx))
+            idx += 1
+            x += cw + 1                    # +1 divider
+        if rc == 1:
+            row_node = leaves[0]
+        else:
+            row_node = "%dx%d,%d,%d{%s}" % (W, rh, 0, y, ",".join(leaves))
+        rows_str.append(row_node)
+        y += rh + 1                        # +1 divider
+    if rows == 1:
+        body = rows_str[0]
+    else:
+        body = "%dx%d,0,0[%s]" % (W, H, ",".join(rows_str))
+    return checksum(body) + "," + body
+
+if __name__ == "__main__":
+    W, H, N, PER = (int(x) for x in sys.argv[1:5])
+    print(build(W, H, N, PER))

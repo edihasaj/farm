@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# farm-inspect — blow up the focused pane's content into a near-fullscreen,
+# scrollable, READ-ONLY overlay so you can actually READ a long prompt/output
+# that's cramped in a tiny grid pane.
+#
+# WHY a popup + nested tmux (and not `less`):
+#   - display-popup is a pure OVERLAY: it never touches the grid's layout or which
+#     pane is focused, so closing it leaves everything EXACTLY as it was — the live
+#     pane keeps running, focus snaps right back. "As if the popup never happened."
+#   - the viewer is a throwaway tmux on its OWN socket, sitting in copy-mode. That
+#     reuses the farm's native scroll/copy feel (wheel, drag-select, y to copy) and
+#     lets Escape/q close instantly — `less` can't bind bare ESC without breaking
+#     arrow keys. capture-pane -e keeps colors; -J de-wraps so narrow-pane lines
+#     reflow cleanly at the wide popup width.
+#
+# Read-only: it's a snapshot (captured text in copy-mode) — typing can't reach the
+# real pane. Bound in config/tmux.conf:  prefix + i   (inspect).
+#
+# Usage: farm-inspect [target-pane-id]
+#   FARM_INSPECT_LINES=20000 farm-inspect
+set -uo pipefail
+
+pane="${1:-}"
+lines="${FARM_INSPECT_LINES:-10000}"
+case "$lines" in
+  ''|*[!0-9]*|0) lines=10000 ;;
+esac
+sock="farminspect-$$"
+tmpf="$(mktemp -t farm-inspect.XXXXXX)"
+conf="$(mktemp -t farm-inspect-conf.XXXXXX)"
+sockfile="${TMUX_TMPDIR:-/tmp/tmux-$(id -u)}/$sock"
+trap 'tmux -L "$sock" kill-server 2>/dev/null || true; rm -f "$tmpf" "$conf" "$sockfile"' EXIT
+
+# Snapshot: colored (-e) + de-wrapped (-J) screen plus recent scrollback. Capping
+# the capture keeps the overlay fast even when a noisy pane has a large history.
+tmux capture-pane -p -e -J ${pane:+-t "$pane"} -S "-$lines" > "$tmpf" 2>/dev/null || true
+[ -s "$tmpf" ] && printf '' || printf '(pane is empty)\n' > "$tmpf"
+
+# Throwaway viewer config: a clean copy-mode reader. Escape/q close it (kill-server),
+# wheel/keys scroll, drag still copies to the Mac clipboard via the outer terminal.
+cat > "$conf" <<'CONF'
+set  -g mouse on
+set  -g mode-keys vi
+set  -g status off
+set -sg escape-time 10
+set -as terminal-features '*:RGB'
+set  -g set-clipboard on
+# Esc / q -> close the inspector, from anywhere (root + copy-mode).
+bind -n Escape kill-server
+bind -n q      kill-server
+bind -T copy-mode-vi Escape kill-server
+bind -T copy-mode-vi q      kill-server
+# Wheel scrolls in gentle 3-line steps (matches the farm's tuned feel).
+bind -n WheelUpPane                copy-mode -e \; send -X -N3 scroll-up
+bind -T copy-mode-vi WheelUpPane   send -X -N3 scroll-up
+bind -T copy-mode-vi WheelDownPane send -X -N3 scroll-down
+# Drag-select -> copy to clipboard, keep the highlight (read-and-grab).
+bind -T copy-mode-vi v             send -X begin-selection
+bind -T copy-mode-vi y             send -X copy-selection-no-clear
+bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-selection-no-clear
+CONF
+
+# Launch the viewer: cat the snapshot into the pane (becomes scrollback), drop into
+# copy-mode at the bottom (newest, like the live pane), then block. $TMUX must be
+# unset or tmux refuses to "nest"; the separate -L socket keeps it fully isolated.
+env -u TMUX tmux -L "$sock" -f "$conf" \
+  new-session "cat \"$tmpf\"; env -u TMUX tmux -L \"$sock\" copy-mode -e -t0; exec sleep 2147483647" \
+  2>/dev/null || true

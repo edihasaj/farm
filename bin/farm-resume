@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""farm-resume — find recently-active claude/codex sessions and bring them back.
+
+After a reboot/crash the live agent *processes* die, but each agent writes a
+durable session log:
+    claude -> ~/.claude/projects/<escaped-cwd>/<session-id>.jsonl
+    codex  -> ~/.codex/sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl
+Both survive reboots and are resumable (`claude --resume <id>`, `codex resume <id>`).
+
+This scans those logs for sessions touched within a recent window, dedupes to the
+newest per (tool, project), and either prints them, stages the resume command into
+the farm panes (typed, NOT executed), or launches them.
+
+Usage:
+    farm-resume [list]          show recent resumable sessions + handoff (default)
+    farm-resume stage           type `cd <dir> && <resume>` into free farm panes (no Enter)
+    farm-resume go              same, but press Enter (launches the agents)
+    farm-resume <list|stage|go> --since 24   window in hours (default 24)
+                                --session NAME   tmux session (default: farm)
+                                --json           machine-readable output (list mode)
+
+Safety: stage/go only target *free* panes (a shell, not a running agent), and never
+touch a pane that already has claude/codex running.
+"""
+import os, sys, json, glob, subprocess, time
+
+HOME = os.path.expanduser("~")
+CLAUDE_DIR = f"{HOME}/.claude/projects"
+CODEX_DIR = f"{HOME}/.codex/sessions"
+SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
+
+
+def _first_field(path, key, max_lines=80):
+    """Cheaply pull the first JSON value for `key` from a .jsonl without full parse."""
+    needle = f'"{key}":"'
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for i, line in enumerate(f):
+                j = line.find(needle)
+                if j != -1:
+                    start = j + len(needle)
+                    end = line.find('"', start)
+                    if end != -1:
+                        return line[start:end]
+                if i >= max_lines:
+                    break
+    except OSError:
+        return None
+    return None
+
+
+def _first_user_task(path, max_lines=400):
+    """Best-effort one-line summary of what the session was doing."""
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for i, line in enumerate(f):
+                if i > max_lines:
+                    break
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                m = o.get("message", o.get("payload", o))
+                role = m.get("role") or o.get("type")
+                if role != "user":
+                    continue
+                c = m.get("content")
+                txt = ""
+                if isinstance(c, str):
+                    txt = c
+                elif isinstance(c, list):
+                    for b in c:
+                        if isinstance(b, dict) and b.get("type") in ("text", "input_text"):
+                            txt = b.get("text", "")
+                            break
+                txt = txt.strip()
+                if not txt or txt.startswith("<") or txt.startswith("You are ") \
+                        or txt.startswith("# ") or "tool_result" in txt[:20]:
+                    continue
+                return " ".join(txt.split())[:110]
+    except OSError:
+        pass
+    return ""
+
+
+def scan(since_hours):
+    cutoff = time.time() - since_hours * 3600
+    found = []  # (mtime, tool, cwd, session_id, task, path)
+
+    for p in glob.glob(f"{CLAUDE_DIR}/*/*.jsonl"):
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if mt < cutoff:
+            continue
+        cwd = _first_field(p, "cwd") or ""
+        sid = os.path.basename(p)[:-6]  # strip .jsonl
+        found.append((mt, "claude", cwd, sid, _first_user_task(p), p))
+
+    for p in glob.glob(f"{CODEX_DIR}/*/*/*/*.jsonl"):
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if mt < cutoff:
+            continue
+        cwd = _first_field(p, "cwd") or ""
+        base = os.path.basename(p)
+        sid = base.split("-")[-1][:-6] if base.endswith(".jsonl") else base
+        # codex uuid is the trailing 5 dash-groups; recover it robustly
+        stem = base[:-6]
+        parts = stem.split("-")
+        sid = "-".join(parts[-5:]) if len(parts) >= 5 else stem
+        found.append((mt, "codex", cwd, sid, _first_user_task(p), p))
+
+    # newest first, dedupe to newest per (tool, cwd)
+    found.sort(reverse=True)
+    seen, out = set(), []
+    for rec in found:
+        key = (rec[1], rec[2])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(rec)
+    return out
+
+
+def resume_cmd(tool, cwd, sid):
+    short = cwd.replace(HOME, "~")
+    if tool == "claude":
+        return f"cd {short} && claude --resume {sid}"
+    return f"cd {short} && codex resume {sid}"
+
+
+def tmux(*args):
+    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+
+
+def free_panes(session):
+    r = tmux("list-panes", "-s", "-t", session, "-F",
+             "#{window_index}.#{pane_index}\t#{pane_current_command}")
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        pid, _, cmd = line.partition("\t")
+        if cmd in SHELLS:
+            out.append(pid)
+    return out
+
+
+def main():
+    argv = sys.argv[1:]
+    mode = "list"
+    if argv and argv[0] in ("list", "stage", "go"):
+        mode = argv.pop(0)
+    since = 24.0
+    session = "farm"
+    as_json = False
+    while argv:
+        a = argv.pop(0)
+        if a == "--since":
+            since = float(argv.pop(0))
+        elif a == "--session":
+            session = argv.pop(0)
+        elif a == "--json":
+            as_json = True
+        else:
+            print(f"farm-resume: unknown arg {a}", file=sys.stderr)
+            return 2
+
+    sessions = scan(since)
+    if not sessions:
+        print(f"No claude/codex sessions touched in the last {since:g}h.")
+        return 0
+
+    if mode == "list":
+        if as_json:
+            print(json.dumps([
+                {"mtime": m, "tool": t, "cwd": c, "session": s, "task": tk,
+                 "cmd": resume_cmd(t, c, s)}
+                for (m, t, c, s, tk, _p) in sessions], indent=2))
+            return 0
+        print(f"Recent resumable sessions (last {since:g}h, newest per project):\n")
+        for (m, t, c, s, tk, _p) in sessions:
+            ago = (time.time() - m) / 3600
+            tag = "🟣claude" if t == "claude" else "🟢codex "
+            print(f"  {tag}  {c.replace(HOME, '~'):<34}  {ago:4.1f}h ago")
+            if tk:
+                print(f"           ↳ {tk}")
+            print(f"           {resume_cmd(t, c, s)}\n")
+        print("Bring them back:  farm-resume stage   (type, you hit Enter)")
+        print("              or:  farm-resume go      (launch now)")
+        return 0
+
+    # stage / go
+    if tmux("has-session", "-t", session).returncode != 0:
+        print(f"farm-resume: tmux session '{session}' not found "
+              f"(start it first: farm)", file=sys.stderr)
+        return 1
+    panes = free_panes(session)
+    if not panes:
+        print(f"farm-resume: no free panes in '{session}' "
+              f"(all panes busy). Sessions to resume manually:\n")
+        for (m, t, c, s, tk, _p) in sessions:
+            print("  " + resume_cmd(t, c, s))
+        return 1
+
+    n = min(len(panes), len(sessions))
+    for i in range(n):
+        pane = panes[i]
+        (_m, t, c, s, _tk, _p) = sessions[i]
+        cmd = resume_cmd(t, c, s)
+        tmux("send-keys", "-t", f"{session}:{pane}", "-l", cmd)
+        if mode == "go":
+            tmux("send-keys", "-t", f"{session}:{pane}", "Enter")
+        verb = "launched" if mode == "go" else "staged"
+        print(f"{verb}  {session}:{pane}  <- {cmd}")
+    if len(sessions) > n:
+        print(f"\n{len(sessions) - n} more session(s) — not enough free panes:")
+        for (m, t, c, s, tk, _p) in sessions[n:]:
+            print("  " + resume_cmd(t, c, s))
+    if mode == "stage":
+        print("\nReview each pane, then hit Enter to launch.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

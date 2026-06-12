@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# farm-snapshot [session] — capture the FULL state of the farm tmux session so it
+# survives a crash/sleep/agent-exit (continuum only keeps the latest pane contents
+# and bare shells after a restart; this keeps real history).
+#
+# Each run writes ~/.farm-snapshots/<timestamp>/ containing:
+#   layout.txt         window/pane geometry + cwd + current command
+#   panes/<W>.<P>.txt  each pane's cwd header + last N scrollback lines
+#   SUMMARY.md         per-pane: repo, cwd, tail of activity (a readable handoff)
+#
+# Keeps the last $KEEP snapshots (default 5), prunes older. Run by hand anytime,
+# or via the LaunchAgent (every 15 min). Safe to run when no session exists (no-op).
+#
+# Recover easily:
+#   farm-snapshot list        list snapshots, newest first
+#   farm-snapshot show [N]     print the SUMMARY of the Nth-newest (default latest)
+#   farm-snapshot path [N]     print its folder (e.g. open the per-pane scrollback)
+#   farm-snapshot [session]    capture a new snapshot (default session: farm)
+#
+#   env: FARM_SNAPSHOT_KEEP   how many to retain (default 5)
+#        FARM_SNAPSHOT_LINES  scrollback lines per pane (default 2000)
+set -uo pipefail
+
+ROOT="$HOME/.farm-snapshots"
+
+# --- read-back subcommands (easy recovery) -------------------------------------
+# farm-snapshot list            -> list snapshots, newest first
+# farm-snapshot show [N]        -> print the SUMMARY of the Nth-newest (default 1=latest)
+# farm-snapshot path [N]        -> print the directory path of the Nth-newest
+# farm-snapshot <session>       -> (default) capture a new snapshot of that session
+nth_dir() {  # $1 = 1-based index from newest
+  ls -1dt "$ROOT"/[0-9]*T[0-9]* 2>/dev/null | sed -n "${1:-1}p"
+}
+case "${1:-}" in
+  list|ls)
+    i=1
+    ls -1dt "$ROOT"/[0-9]*T[0-9]* 2>/dev/null | while read -r d; do
+      sm="$d/SUMMARY.md"; first=$(sed -n '3p' "$sm" 2>/dev/null)
+      printf "%2d) %s  %s\n" "$i" "$(basename "$d")" "$first"; i=$((i+1))
+    done
+    [ -d "$ROOT" ] || echo "(no snapshots yet)"
+    exit 0 ;;
+  show|cat)
+    d=$(nth_dir "${2:-1}")
+    [ -n "$d" ] && cat "$d/SUMMARY.md" || echo "no snapshot ${2:-1}"
+    exit 0 ;;
+  path)
+    d=$(nth_dir "${2:-1}"); [ -n "$d" ] && echo "$d" || echo "no snapshot ${2:-1}"
+    exit 0 ;;
+  -h|--help)
+    sed -n '2,16p' "$0"; exit 0 ;;
+esac
+# -------------------------------------------------------------------------------
+
+SESSION="${1:-farm}"
+KEEP="${FARM_SNAPSHOT_KEEP:-5}"
+LINES="${FARM_SNAPSHOT_LINES:-2000}"
+TMUX_BIN="$(command -v tmux 2>/dev/null || echo /opt/homebrew/bin/tmux)"
+
+# Find the live server's socket explicitly and address it with `tmux -S`. Relying on
+# $TMUX_TMPDIR is fragile under launchd: launchd sets TMPDIR to a per-user
+# /var/folders/.../T path, and tmux normalizes /tmp vs /private/tmp inconsistently, so
+# a scheduled run would look in the wrong dir and capture 0 panes. The default socket
+# lives at <tmpdir>/tmux-<uid>/default; check the usual spots and pick the one with a
+# running server. TM() wraps every tmux call with the resolved -S.
+SOCK=""
+for d in "${TMUX_TMPDIR:-}" /private/tmp /tmp; do
+  [ -n "$d" ] || continue
+  cand="$d/tmux-$(id -u)/default"
+  if [ -S "$cand" ] && "$TMUX_BIN" -S "$cand" has-session 2>/dev/null; then SOCK="$cand"; break; fi
+done
+TM() { if [ -n "$SOCK" ]; then "$TMUX_BIN" -S "$SOCK" "$@"; else "$TMUX_BIN" "$@"; fi; }
+
+TM has-session -t "$SESSION" 2>/dev/null || { echo "farm-snapshot: no session '$SESSION' (nothing to save)" >&2; exit 0; }
+
+ts="$(date +%Y%m%dT%H%M%S)"
+dir="$ROOT/$ts"
+mkdir -p "$dir/panes" || { echo "farm-snapshot: cannot create $dir" >&2; exit 1; }
+
+# 1) layout
+{
+  echo "# farm-snapshot $ts  session=$SESSION"
+  echo "## windows"
+  TM list-windows -t "$SESSION" -F '#{window_index} #{window_name} panes=#{window_panes} layout=#{window_layout}'
+  echo "## panes"
+  TM list-panes -s -t "$SESSION" -F '#{window_name}.#{pane_index} id=#{pane_id} cmd=#{pane_current_command} cwd=#{pane_current_path}'
+} > "$dir/layout.txt"
+
+# 2) per-pane scrollback (last $LINES lines) with a header.
+# Use a literal '|' field separator, not a tab: a tab embedded in tmux's -F string
+# can be collapsed (esp. under launchd), which merged pid/label/cwd into one token
+# and made capture-pane -t target garbage -> 0 panes captured. '|' is safe here
+# (pane ids / window names / paths don't contain it).
+TM list-panes -s -t "$SESSION" -F '#{pane_id}|#{window_name}.#{pane_index}|#{pane_current_path}' \
+| while IFS='|' read -r pid label cwd; do
+    [ -n "$pid" ] || continue
+    {
+      echo "# pane $label  ($pid)"
+      echo "# cwd: $cwd"
+      echo "# ---- scrollback (last $LINES lines) ----"
+      TM capture-pane -p -t "$pid" -S "-$LINES" 2>/dev/null
+    } > "$dir/panes/${label}.txt"
+  done
+
+# 3) SUMMARY.md — readable, auto-generated handoff
+{
+  nwin=$(TM list-windows -t "$SESSION" | wc -l | tr -d ' ')
+  npane=$(TM list-panes -s -t "$SESSION" | wc -l | tr -d ' ')
+  echo "# Farm snapshot — $ts"
+  echo
+  echo "Session **$SESSION** · $nwin windows · $npane panes."
+  echo "_Auto-captured by farm-snapshot. Restore layout via tmux-resurrect; read below for what each pane was doing._"
+  echo
+  for f in "$dir"/panes/*.txt; do
+    [ -e "$f" ] || continue
+    label=$(basename "$f" .txt)
+    cwd=$(sed -n 's/^# cwd: //p' "$f")
+    repo=$(basename "$cwd" 2>/dev/null)
+    # last 4 meaningful lines (skip blanks + bare prompt lines)
+    tail=$(grep -vE '^[[:space:]]*$|^[[:space:]]*❯[[:space:]]*$|^[[:space:]]*~?/.* ❯[[:space:]]*$' "$f" \
+           | grep -v '^# ' | tail -4 | sed 's/^/    /')
+    echo "## ${label} — ${repo:-?}"
+    echo "- cwd: \`${cwd}\`"
+    if [ -n "$tail" ]; then echo "- last activity:"; echo '  ```'; echo "$tail"; echo '  ```'; fi
+    echo
+  done
+} > "$dir/SUMMARY.md"
+
+# 4) rotate: keep newest $KEEP timestamp dirs, delete older. Strictly scoped to ROOT
+#    and to dirs whose name matches the snapshot timestamp pattern (never anything else).
+ls -1dt "$ROOT"/[0-9]*T[0-9]* 2>/dev/null | tail -n +"$((KEEP + 1))" | while read -r old; do
+  case "$old" in
+    "$ROOT"/[0-9]*T[0-9]*) rm -rf "$old" && echo "pruned $(basename "$old")" ;;
+  esac
+done
+
+echo "snapshot: $dir"
+echo "  $(ls "$dir"/panes | wc -l | tr -d ' ') panes captured · SUMMARY.md written · keeping last $KEEP"

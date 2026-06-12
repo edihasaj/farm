@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# farm-risk-snapshot [session] [min_interval_seconds]
+#
+# Throttled snapshot for risky tmux actions. Mouse drag/wheel copy enters tmux
+# copy-mode; tmux 3.6b can abort there. Keep a near-current recovery point
+# without taking a full snapshot on every mouse event.
+set -uo pipefail
+
+SESSION="${1:-farm}"
+MIN_INTERVAL="${2:-${FARM_RISK_SNAPSHOT_INTERVAL:-60}}"
+ROOT="$HOME/.farm-snapshots"
+STAMP="$ROOT/risk-$SESSION.stamp"
+LOCK="$ROOT/risk-$SESSION.lock"
+SNAPSHOT_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/farm-snapshot"
+
+mkdir -p "$ROOT" || exit 0
+[[ "$MIN_INTERVAL" =~ ^[0-9]+$ ]] || MIN_INTERVAL=60
+
+now="$(date +%s)"
+last="$(cat "$STAMP" 2>/dev/null || echo 0)"
+[[ "$last" =~ ^[0-9]+$ ]] || last=0
+if (( now - last < MIN_INTERVAL )); then
+  exit 0
+fi
+
+if ! mkdir "$LOCK" 2>/dev/null; then
+  exit 0
+fi
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+now="$(date +%s)"
+last="$(cat "$STAMP" 2>/dev/null || echo 0)"
+[[ "$last" =~ ^[0-9]+$ ]] || last=0
+if (( now - last < MIN_INTERVAL )); then
+  exit 0
+fi
+printf '%s\n' "$now" > "$STAMP"
+
+FARM_SNAPSHOT_KEEP="${FARM_SNAPSHOT_KEEP:-20}" \
+FARM_SNAPSHOT_LINES="${FARM_SNAPSHOT_LINES:-3000}" \
+  "$SNAPSHOT_BIN" "$SESSION" >>"$ROOT/risk.log" 2>&1 || true

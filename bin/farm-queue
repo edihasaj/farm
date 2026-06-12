@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# farm-queue — file-based task queue for the farm agent loop.
+#
+# One task = one file moving through state dirs under $FARM_HOME/queue/:
+#   pending/ -> running/ -> done/ | failed/
+# Claims are a single rename (mv), atomic on one filesystem, so any number of
+# farm-loop workers can drain the same queue without locks or double-claims.
+#
+# usage:
+#   farm-queue                                  # status summary
+#   farm-queue add <repo> <task> [notes…]       # repo key resolved by shipyard
+#   farm-queue add <url> [notes…]               # GitHub/Jira URL; shipyard infers repo
+#   farm-queue list [pending|running|done|failed|all]
+#   farm-queue next                             # claim oldest pending; prints id
+#   farm-queue show <id>                        # task fields + state + log path
+#   farm-queue done <id> | fail <id>            # running -> done/failed
+#   farm-queue retry <id>                       # any state -> pending
+#   farm-queue rm <id>                          # drop a task (and its log)
+#
+# Task file format (line-oriented, parsed with sed):
+#   repo: app-repo          # empty for URL tasks
+#   task: ISSUE-123
+#   notes: optional extra words for the agent
+#   added: 2026-06-10T00:00:00Z
+set -euo pipefail
+
+FARM="${FARM_HOME:-$HOME/Projects/farm}"
+Q="$FARM/queue"
+PEND="$Q/pending" RUN="$Q/running" DONE="$Q/done" FAIL="$Q/failed" LOGS="$Q/logs"
+mkdir -p "$PEND" "$RUN" "$DONE" "$FAIL" "$LOGS"
+
+die() { echo "farm-queue: $*" >&2; exit 1; }
+usage() { sed -n '2,28p' "$0"; exit "${1:-0}"; }
+
+field() { sed -n "s/^$2: //p" "$1" | head -1; }
+
+# find_task <id> -> prints "<state> <path>" or fails
+find_task() {
+  local id="$1" state dir
+  for state in pending running done failed; do
+    case "$state" in
+      pending) dir="$PEND";; running) dir="$RUN";; done) dir="$DONE";; failed) dir="$FAIL";;
+    esac
+    [ -f "$dir/$id.task" ] && { echo "$state $dir/$id.task"; return 0; }
+  done
+  return 1
+}
+
+add() {
+  local repo="" task="" notes=""
+  case "${1:-}" in
+    "") die "usage: farm-queue add <repo|url> <task> [notes…]" ;;
+    http://*|https://*)
+      task="$1"; shift; notes="${*:-}" ;;
+    *)
+      repo="$1"; shift
+      task="${1:-}"; [ -n "$task" ] || die "missing task for repo '$repo'"
+      shift; notes="${*:-}"
+      ;;
+  esac
+
+  # id: sortable timestamp prefix (FIFO order) + readable slug; bump a counter
+  # on collision so same-second adds stay unique.
+  local slug base id n=0
+  slug="$(printf '%s-%s' "$repo" "$task" \
+    | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40)"
+  base="$(date +%Y%m%d-%H%M%S)"
+  id="$base-$slug"
+  while find_task "$id" >/dev/null 2>&1; do n=$((n+1)); id="$base-$n-$slug"; done
+
+  {
+    echo "repo: $repo"
+    echo "task: $task"
+    echo "notes: $notes"
+    echo "added: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$PEND/$id.task"
+  echo "$id"
+}
+
+# next — claim oldest pending task. The mv is the lock: when two workers race,
+# rename(2) succeeds for exactly one; the loser just tries the next file.
+next() {
+  local f id
+  for f in $(ls -1 "$PEND" 2>/dev/null | sort); do   # ids never contain spaces
+    id="${f%.task}"
+    if mv "$PEND/$f" "$RUN/$f" 2>/dev/null; then echo "$id"; return 0; fi
+  done
+  return 1
+}
+
+list_state() {
+  local label="$1" dir="$2" f repo task
+  for f in $(ls -1 "$dir" 2>/dev/null | sort); do
+    repo="$(field "$dir/$f" repo)"; task="$(field "$dir/$f" task)"
+    printf '%-8s %s  %s  %s\n' "$label" "${f%.task}" "${repo:-<url>}" "$task"
+  done
+}
+
+list() {
+  case "${1:-all}" in
+    pending) list_state pending "$PEND" ;;
+    running) list_state running "$RUN" ;;
+    done)    list_state done "$DONE" ;;
+    failed)  list_state failed "$FAIL" ;;
+    all)
+      list_state pending "$PEND"; list_state running "$RUN"
+      list_state failed "$FAIL";  list_state done "$DONE" ;;
+    *) die "unknown state: $1" ;;
+  esac
+}
+
+status() {
+  printf 'queue: %s\n' "$Q"
+  printf 'pending %s  running %s  failed %s  done %s\n' \
+    "$(ls -1 "$PEND" 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(ls -1 "$RUN"  2>/dev/null | wc -l | tr -d ' ')" \
+    "$(ls -1 "$FAIL" 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(ls -1 "$DONE" 2>/dev/null | wc -l | tr -d ' ')"
+  list_state pending "$PEND"; list_state running "$RUN"; list_state failed "$FAIL"
+}
+
+move_to() {
+  local id="$1" dest="$2" found path
+  found="$(find_task "$id")" || die "no such task: $id"
+  path="${found#* }"
+  mv "$path" "$dest/$id.task"
+}
+
+show() {
+  local id="$1" found state path
+  found="$(find_task "$id")" || die "no such task: $id"
+  state="${found%% *}"; path="${found#* }"
+  echo "state: $state"
+  cat "$path"
+  [ -f "$LOGS/$id.log" ] && echo "log: $LOGS/$id.log"
+}
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  add)    add "$@" ;;
+  list)   list "${1:-all}" ;;
+  next)   next ;;
+  show)   show "${1:?usage: farm-queue show <id>}" ;;
+  done)   move_to "${1:?usage: farm-queue done <id>}" "$DONE" ;;
+  fail)   move_to "${1:?usage: farm-queue fail <id>}" "$FAIL" ;;
+  retry)  move_to "${1:?usage: farm-queue retry <id>}" "$PEND" ;;
+  rm)     id="${1:?usage: farm-queue rm <id>}"
+          found="$(find_task "$id")" || die "no such task: $id"
+          rm -f "${found#* }" "$LOGS/$id.log" ;;
+  status) status ;;
+  -h|--help) usage 0 ;;
+  *) die "unknown command: $cmd (try --help)" ;;
+esac
