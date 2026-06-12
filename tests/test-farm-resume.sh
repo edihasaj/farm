@@ -49,6 +49,31 @@ CMD2="$(HOME="$TMP" "$RESUME" list --since 720 --json 2>/dev/null \
 has 'codex resume 11111111-2222-3333-4444-555555555555' "$CMD2" "no turn_context: still resumes"
 hasnt '-c model'                          "$CMD2" "no turn_context: no model override appended"
 
+# --- claude: last permissionMode (bypass) -> --dangerously-skip-permissions ---
+CL_DIR="$TMP/.claude/projects/-tmp-demo-proj"
+mkdir -p "$CL_DIR"
+CL="$CL_DIR/cccccccc-dddd-eeee-ffff-000000000000.jsonl"
+cat > "$CL_DIR/cccccccc-dddd-eeee-ffff-000000000000.jsonl" <<'EOF'
+{"type":"user","cwd":"/tmp/demo-proj","permissionMode":"auto","message":{"role":"user","content":"start"}}
+{"type":"assistant","cwd":"/tmp/demo-proj","permissionMode":"bypassPermissions","message":{"role":"assistant","model":"claude-opus-4-8"}}
+EOF
+CLCMD="$(HOME="$TMP" "$RESUME" list --since 720 --json 2>/dev/null \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next(x["cmd"] for x in d if x["tool"]=="claude"))')"
+has 'claude --resume cccccccc-dddd-eeee-ffff-000000000000' "$CLCMD" "claude resumes by id"
+has '--dangerously-skip-permissions'  "$CLCMD" "claude carries last mode (bypass)"
+hasnt '--permission-mode'             "$CLCMD" "bypass uses the flag, not --permission-mode"
+
+# --- claude: a session that ended in 'auto' -> --permission-mode auto ---
+CL2_DIR="$TMP/.claude/projects/-tmp-demo-auto"
+mkdir -p "$CL2_DIR"
+cat > "$CL2_DIR/99999999-aaaa-bbbb-cccc-dddddddddddd.jsonl" <<'EOF'
+{"type":"user","cwd":"/tmp/demo-auto","permissionMode":"auto","message":{"role":"user","content":"go"}}
+EOF
+CLCMD2="$(HOME="$TMP" "$RESUME" list --since 720 --json 2>/dev/null \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next(x["cmd"] for x in d if x["cwd"]=="/tmp/demo-auto"))')"
+has '--permission-mode auto'          "$CLCMD2" "claude restores --permission-mode auto"
+hasnt 'dangerously'                   "$CLCMD2" "auto mode does not add dangerously-skip"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

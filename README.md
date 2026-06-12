@@ -32,7 +32,7 @@ shipyard <repo> <task>
 | `bin/farm-tabname` | zsh snippet: name iTerm tabs by git repo |
 | `bin/farm-reflow` | reshape the grid to the client width (client-resized hook) |
 | `bin/farm-inspect` | blow up the focused pane into a fullscreen, scrollable, read-only overlay capped at recent history (`FARM_INSPECT_LINES`, default 10000) — `prefix + i`, `Esc`/`q` to close |
-| `bin/farm-resume` | after a reboot/crash, find recently-active claude/codex sessions and `list`/`stage`/`go` to resume each in its pane. Codex resumes carry forward the model + reasoning effort the session last used (read from the rollout's `turn_context`), so they don't drop to the default medium thinking |
+| `bin/farm-resume` | after a reboot/crash, find recently-active claude/codex sessions and `list`/`stage`/`go` to resume each in its pane. Resumes carry forward what each session was using: codex gets its model + reasoning effort (from the rollout's `turn_context`, so no drop to default medium); claude gets its last permission mode (`bypassPermissions` → `--dangerously-skip-permissions`, else `--permission-mode <mode>`), which claude otherwise won't re-apply on `--resume` |
 | `bin/farm-risk-snapshot` | throttled safety snapshot before copy-mode entry, keeping mouse copy UX while making tmux crashes recoverable |
 | `bin/farm-queue` | file-based task queue (`queue/pending→running→done\|failed`); tasks carry their repo, so one queue feeds many projects |
 | `bin/farm-loop` | agent loop: drains the queue through `shipyard -p`; run one per pane for parallel workers |

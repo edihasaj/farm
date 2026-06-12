@@ -154,10 +154,41 @@ def _codex_model_effort(path):
     return model, effort
 
 
+def _claude_permission_mode(path):
+    """Last permission mode the claude session used.
+
+    claude deliberately does NOT re-apply --dangerously-skip-permissions on
+    --resume (it's a per-launch security opt-in), so resumed panes lose it and
+    start prompting again. We read the last recorded `permissionMode` and restore
+    the matching launch flag. (The model IS restored by claude itself on resume,
+    so we leave that alone — and effort isn't persisted in the transcript.)
+    """
+    mode = None
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                if '"permissionMode"' not in line:  # cheap pre-filter
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                mode = o.get("permissionMode") or mode
+    except OSError:
+        pass
+    return mode
+
+
 def resume_cmd(tool, cwd, sid, path=None):
     short = cwd.replace(HOME, "~")
     if tool == "claude":
-        return f"cd {short} && claude --resume {sid}"
+        cmd = f"cd {short} && claude --resume {sid}"
+        mode = _claude_permission_mode(path) if path else None
+        if mode == "bypassPermissions":
+            cmd += " --dangerously-skip-permissions"
+        elif mode and mode != "default":
+            cmd += f" --permission-mode {mode}"
+        return cmd
     cmd = f"cd {short} && codex resume {sid}"
     if path:
         model, effort = _codex_model_effort(path)
