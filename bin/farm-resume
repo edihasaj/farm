@@ -221,7 +221,9 @@ def main():
     mode = "list"
     if argv and argv[0] in ("list", "stage", "go"):
         mode = argv.pop(0)
-    since = 24.0
+    # A machine can sit off over a long weekend; a 24h window then misses every
+    # session. Default to 72h, overridable via FARM_RESUME_SINCE or --since.
+    since = float(os.environ.get("FARM_RESUME_SINCE", "72"))
     session = "farm"
     as_json = False
     while argv:

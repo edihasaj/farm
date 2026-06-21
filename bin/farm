@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# farm [N] [dir] — open/attach the tmux farm: 32 panes total, split into TABS of N
-# panes each, every tab an even (cols x 2) grid.
+# farm [resume|-r] [N] [dir] — open/attach the tmux farm: 32 panes total, split
+# into TABS of N panes each, every tab an even (cols x 2) grid.
 #
+#   resume / -r   force resume staging even on an existing session (post-reboot)
 #   N    panes per tab (default 8):
 #          farm / farm 8 -> 4 tabs x 8 (4x2)
 #          farm 6        -> 6 tabs (5x6 + 1x2)
@@ -14,9 +15,19 @@
 set -uo pipefail
 
 SESSION=farm
+
+# Optional leading resume/-r/--resume: force resume staging (works on an existing
+# session, not just a fresh one). Without it, staging still auto-fires after a
+# reboot — see below.
+FORCE_RESUME=0
+if [[ "${1:-}" == "resume" || "${1:-}" == "-r" || "${1:-}" == "--resume" ]]; then
+  FORCE_RESUME=1
+  shift
+fi
+
 N="${1:-8}"
 START_DIR="${2:-$HOME/Projects}"
-[[ "$N" =~ ^[0-9]+$ ]] && (( N >= 1 )) || { echo "usage: farm [N] [dir]" >&2; exit 1; }
+[[ "$N" =~ ^[0-9]+$ ]] && (( N >= 1 )) || { echo "usage: farm [resume|-r] [N] [dir]" >&2; exit 1; }
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FARM_VIEW="${FARM_VIEW:-$BIN/farm-view}"
 [[ -x "$FARM_VIEW" ]] || FARM_VIEW="$HOME/.local/bin/farm-view"
@@ -31,9 +42,58 @@ FARM_VIEW="${FARM_VIEW:-$BIN/farm-view}"
 # Re-running `farm` is therefore the one-shot fix for a drifted server.
 refresh_server_env() { tmux set-environment -g PATH "$PATH" 2>/dev/null || true; }
 
+# True iff every pane in the session is a bare shell (no agent running). That's the
+# post-reboot signature: tmux-continuum restores the windows/panes but the agent
+# processes are gone, so nothing but login shells are running.
+all_panes_idle() {
+  local cmds
+  cmds="$(tmux list-panes -s -t "$SESSION" -F '#{pane_current_command}' 2>/dev/null)" || return 1
+  [[ -n "$cmds" ]] || return 1
+  while IFS= read -r c; do
+    case "$c" in
+      zsh|-zsh|bash|-bash|fish|sh|-sh|"") ;;
+      *) return 1 ;;
+    esac
+  done <<< "$cmds"
+  return 0
+}
+
+# Pre-stage the resume command for each recently-active claude/codex session into
+# the free panes — TYPED, NOT executed — so you review + hit Enter. Opt out with
+# FARM_NO_RESUME=1. Manual: `farm-resume list|stage|go`.
+stage_resumes() {
+  [[ -z "${FARM_NO_RESUME:-}" ]] || return 0
+  local resume_bin="${FARM_RESUME_BIN:-}"
+  if [[ -z "$resume_bin" ]]; then
+    for candidate in "$BIN/farm-resume" "$HOME/Projects/farm/bin/farm-resume" "$HOME/.local/bin/farm-resume"; do
+      [[ -x "$candidate" ]] && { resume_bin="$candidate"; break; }
+    done
+  fi
+  [[ -n "$resume_bin" ]] || resume_bin="$(command -v farm-resume 2>/dev/null || true)"
+  if [[ -z "$resume_bin" ]]; then
+    echo "farm: farm-resume not found; run ~/Projects/farm/bin/farm-resume list" >&2
+    return 0
+  fi
+  mkdir -p "$HOME/.farm-snapshots"
+  "$resume_bin" stage --session "$SESSION" --since "${FARM_RESUME_SINCE:-72}" \
+    >>"$HOME/.farm-snapshots/farm-resume-stage.log" 2>&1 \
+    || echo "farm: resume staging failed; see ~/.farm-snapshots/farm-resume-stage.log" >&2
+  # Mark this session so a plain re-run of `farm` (before you hit Enter on the
+  # staged panes) doesn't re-stage and double-type. `farm resume` overrides.
+  tmux set-option -t "$SESSION" @farm_resumed 1 2>/dev/null || true
+}
+
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   refresh_server_env
   "$FARM_VIEW" "$N" "$SESSION" "$START_DIR" >/dev/null 2>&1
+  # Post-reboot recovery on an *existing* session: continuum restores the farm at
+  # boot, so it's never "fresh" exactly when agents were lost. Auto-stage when every
+  # pane is a bare shell and we haven't already staged this session. `farm resume`
+  # forces it regardless.
+  already="$(tmux show-option -t "$SESSION" -qv @farm_resumed 2>/dev/null)"
+  if (( FORCE_RESUME )) || { [[ "$already" != "1" ]] && all_panes_idle; }; then
+    stage_resumes
+  fi
   exec tmux attach -t "$SESSION"
 fi
 
@@ -43,26 +103,8 @@ refresh_server_env
 tmux set-option -t "$SESSION" @farm 1
 "$FARM_VIEW" "$N" "$SESSION" "$START_DIR" >/dev/null 2>&1
 
-# Post-reboot recovery: a fresh farm means we likely just lost agents to a
-# crash/reboot. Pre-stage the resume command for each recently-active claude/codex
-# session into the empty panes — TYPED, NOT executed — so you review + hit Enter.
-# Opt out with FARM_NO_RESUME=1.  Manual: `farm-resume list|stage|go`.
-if [[ -z "${FARM_NO_RESUME:-}" ]]; then
-  FARM_RESUME_BIN="${FARM_RESUME_BIN:-}"
-  if [[ -z "$FARM_RESUME_BIN" ]]; then
-    for candidate in "$BIN/farm-resume" "$HOME/Projects/farm/bin/farm-resume" "$HOME/.local/bin/farm-resume"; do
-      [[ -x "$candidate" ]] && { FARM_RESUME_BIN="$candidate"; break; }
-    done
-  fi
-  [[ -n "$FARM_RESUME_BIN" ]] || FARM_RESUME_BIN="$(command -v farm-resume 2>/dev/null || true)"
-  if [[ -n "$FARM_RESUME_BIN" ]]; then
-    mkdir -p "$HOME/.farm-snapshots"
-    "$FARM_RESUME_BIN" stage --session "$SESSION" >>"$HOME/.farm-snapshots/farm-resume-stage.log" 2>&1 \
-      || echo "farm: resume staging failed; see ~/.farm-snapshots/farm-resume-stage.log" >&2
-  else
-    echo "farm: farm-resume not found; run ~/Projects/farm/bin/farm-resume list" >&2
-  fi
-fi
+# A fresh farm usually means we just lost agents to a crash/reboot — stage resumes.
+stage_resumes
 
 tmux select-window -t "$SESSION:F1" 2>/dev/null || true
 exec tmux attach -t "$SESSION"
