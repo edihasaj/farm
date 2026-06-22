@@ -6,5 +6,6 @@ __pycache__/
 *.pyc
 browser/chrome-profile/
 queue/
+control/
 repos/
 sandbox/

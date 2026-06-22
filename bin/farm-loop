@@ -13,6 +13,8 @@
 #   FARM_HOME           queue + repo configs root (default ~/Projects/farm)
 #   FARM_LOOP_SHIP      shipyard binary override (tests stub this)
 #   FARM_LOOP_INTERVAL  watch-mode poll seconds (default 15)
+#   FARM_LOOP_RUN       optional farm-control run id; claim only that run's tasks
+#   FARM_LOOP_PHASE     optional farm-control phase; claim only that phase
 #
 # Each task logs to queue/logs/<id>.log; exit 0 -> done/, else failed/.
 # Ctrl-C mid-task requeues the current task to pending/ before exiting.
@@ -27,7 +29,10 @@ export PATH="$BIN:$HOME/Projects/agent-scripts/bin:$PATH"
 QCMD="$BIN/farm-queue"
 SHIP="${FARM_LOOP_SHIP:-shipyard}"
 Q="$FARM/queue"
+CONTROL="$FARM/control"
 INTERVAL="${FARM_LOOP_INTERVAL:-15}"
+RUN_ID="${FARM_LOOP_RUN:-}"
+PHASE="${FARM_LOOP_PHASE:-}"
 MODE=watch
 
 while [ $# -gt 0 ]; do
@@ -80,9 +85,32 @@ run_task() {
   fi
 }
 
-echo "farm-loop: mode=$MODE  queue=$Q  ship=$SHIP"
+pause_file() {
+  [ -n "$RUN_ID" ] && printf '%s/runs/%s.pause' "$CONTROL" "$RUN_ID" || return 1
+}
+stop_file() {
+  [ -n "$RUN_ID" ] && printf '%s/runs/%s.stop' "$CONTROL" "$RUN_ID" || return 1
+}
+
+echo "farm-loop: mode=$MODE  queue=$Q  ship=$SHIP${RUN_ID:+  run=$RUN_ID}${PHASE:+  phase=$PHASE}"
 while :; do
-  id="$("$QCMD" next 2>/dev/null || true)"
+  if sf="$(stop_file)" && [ -f "$sf" ]; then
+    echo "farm-loop: stopped run=$RUN_ID"
+    exit 130
+  fi
+  if pf="$(pause_file)" && [ -f "$pf" ]; then
+    echo "farm-loop: paused run=$RUN_ID (remove $pf or farm-control resume $RUN_ID)"
+    sleep "$INTERVAL"
+    continue
+  fi
+  if [ -n "$RUN_ID" ] || [ -n "$PHASE" ]; then
+    args=()
+    [ -z "$RUN_ID" ] || args+=(--run "$RUN_ID")
+    [ -z "$PHASE" ] || args+=(--phase "$PHASE")
+    id="$("$QCMD" next "${args[@]}" 2>/dev/null || true)"
+  else
+    id="$("$QCMD" next 2>/dev/null || true)"
+  fi
   if [ -z "$id" ]; then
     case "$MODE" in drain|once) break ;; esac
     sleep "$INTERVAL"

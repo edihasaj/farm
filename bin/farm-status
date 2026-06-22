@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""farm-status — fast run status for terminal, agents, and phone browser."""
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+
+FARM = Path(os.environ.get("FARM_HOME", str(Path.home() / "Projects/farm")))
+RUNS = FARM / "control/runs"
+QUEUE = FARM / "queue"
+
+
+def read_fields(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        for line in path.read_text(errors="ignore").splitlines():
+            key, sep, value = line.partition(": ")
+            if sep:
+                out[key] = value
+    except OSError:
+        pass
+    return out
+
+
+def queue_items(run_id: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for state in ("pending", "running", "failed", "done"):
+        root = QUEUE / state
+        if not root.exists():
+            continue
+        for path in sorted(root.glob("*.task")):
+            fields = read_fields(path)
+            if fields.get("run") != run_id:
+                continue
+            tid = path.name.removesuffix(".task")
+            log = QUEUE / "logs" / f"{tid}.log"
+            items.append(
+                {
+                    "id": tid,
+                    "state": state,
+                    "phase": fields.get("phase", ""),
+                    "repo": fields.get("repo", "") or "<url>",
+                    "task": fields.get("task", ""),
+                    "log": str(log) if log.exists() else "",
+                }
+            )
+    return items
+
+
+def run_summary(path: Path) -> dict[str, Any]:
+    fields = read_fields(path)
+    run_id = fields.get("id", path.name.removesuffix(".run"))
+    items = queue_items(run_id)
+    counts = {state: 0 for state in ("pending", "running", "failed", "done")}
+    for item in items:
+        counts[item["state"]] += 1
+    return {
+        "id": run_id,
+        "state": fields.get("state", ""),
+        "mode": fields.get("mode", ""),
+        "repo": fields.get("repo", ""),
+        "task": fields.get("task", ""),
+        "phase": fields.get("phase", ""),
+        "max_phase": fields.get("max_phase", ""),
+        "agents": fields.get("agents", ""),
+        "session": fields.get("session", ""),
+        "supervisor_pane": fields.get("supervisor_pane", ""),
+        "worker_panes": fields.get("worker_panes", ""),
+        "created": fields.get("created", ""),
+        "manifest": fields.get("manifest", ""),
+        "counts": counts,
+        "tasks": items,
+    }
+
+
+def snapshot(run_id: str | None = None) -> dict[str, Any]:
+    run_paths = sorted(RUNS.glob("*.run"), reverse=True) if RUNS.exists() else []
+    runs = [run_summary(path) for path in run_paths]
+    if run_id:
+        runs = [run for run in runs if run["id"] == run_id]
+    return {"farm": str(FARM), "generated_at": int(time.time()), "runs": runs}
+
+
+def print_text(data: dict[str, Any]) -> None:
+    runs = data["runs"]
+    if not runs:
+        print("no runs")
+        return
+    for run in runs:
+        counts = run["counts"]
+        phase = f" phase {run['phase']}/{run['max_phase']}" if run["phase"] else ""
+        print(f"{run['id']}  {run['state'] or '?'}{phase}  {run['repo']}  {run['task']}")
+        print(
+            "  "
+            f"pending {counts['pending']}  running {counts['running']}  "
+            f"failed {counts['failed']}  done {counts['done']}"
+        )
+        if run["supervisor_pane"]:
+            print(f"  supervisor {run['supervisor_pane']}")
+        if run["worker_panes"]:
+            print(f"  workers {run['worker_panes']}")
+        for task in run["tasks"][:6]:
+            print(f"  - {task['state']:<7} p{task['phase'] or '.'} {task['task'][:96]}")
+
+
+def html_page(data: dict[str, Any], refresh: int) -> bytes:
+    rows = []
+    for run in data["runs"]:
+        counts = run["counts"]
+        task_rows = "".join(
+            "<li><b>{}</b> p{} {}</li>".format(
+                html.escape(task["state"]),
+                html.escape(task["phase"] or "."),
+                html.escape(task["task"][:180]),
+            )
+            for task in run["tasks"][:8]
+        )
+        rows.append(
+            f"""
+            <section>
+              <h2>{html.escape(run['id'])}</h2>
+              <p><b>{html.escape(run['state'] or '?')}</b>
+              phase {html.escape(run['phase'] or '.')}/{html.escape(run['max_phase'] or '.')}
+              · {html.escape(run['repo'])}</p>
+              <p>{html.escape(run['task'])}</p>
+              <p>pending {counts['pending']} · running {counts['running']} ·
+              failed {counts['failed']} · done {counts['done']}</p>
+              <p>supervisor {html.escape(run['supervisor_pane'] or 'none')}<br>
+              workers {html.escape(run['worker_panes'] or 'none')}</p>
+              <ul>{task_rows}</ul>
+            </section>
+            """
+        )
+    body = "\n".join(rows) or "<section><h2>No runs</h2></section>"
+    page = f"""<!doctype html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{refresh}">
+<title>farm status</title>
+<style>
+body {{ margin: 0; font: 15px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; background:#111; color:#eee; }}
+header {{ position: sticky; top: 0; padding: 14px 16px; background:#1c1c1c; border-bottom:1px solid #333; }}
+main {{ padding: 12px; display: grid; gap: 12px; }}
+section {{ border:1px solid #333; border-radius:8px; padding: 12px; background:#181818; }}
+h1,h2,p {{ margin: 0 0 8px; }} ul {{ margin: 8px 0 0; padding-left: 20px; }}
+a {{ color:#8fd; }}
+</style></head><body>
+<header><h1>farm status</h1><p>{html.escape(data['farm'])} · refresh {refresh}s · <a href="/api/runs">json</a></p></header>
+<main>{body}</main></body></html>"""
+    return page.encode()
+
+
+def serve(host: str, port: int, refresh: int) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path.startswith("/api/runs"):
+                body = json.dumps(snapshot(), indent=2).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+            else:
+                body = html_page(snapshot(), refresh)
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _fmt: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"farm-status: http://{host}:{port}  api: /api/runs", file=sys.stderr)
+    server.serve_forever()
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Fast farm run status")
+    sub = parser.add_subparsers(dest="cmd")
+    parser.add_argument("--json", action="store_true", help="print JSON snapshot")
+    parser.add_argument("--run", help="filter to one run id")
+    serve_p = sub.add_parser("serve", help="serve phone-friendly web status")
+    serve_p.add_argument("--host", default="127.0.0.1")
+    serve_p.add_argument("--port", type=int, default=8765)
+    serve_p.add_argument("--refresh", type=int, default=2)
+
+    args = parser.parse_args(argv)
+    if args.cmd == "serve":
+        serve(args.host, args.port, args.refresh)
+        return 0
+    data = snapshot(args.run)
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        print_text(data)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -85,7 +85,9 @@ stage_resumes() {
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   refresh_server_env
-  "$FARM_VIEW" "$N" "$SESSION" "$START_DIR" >/dev/null 2>&1
+  if (( $# > 0 )); then
+    "$FARM_VIEW" "$N" "$SESSION" "$START_DIR" >/dev/null 2>&1
+  fi
   # Post-reboot recovery on an *existing* session: continuum restores the farm at
   # boot, so it's never "fresh" exactly when agents were lost. Auto-stage when every
   # pane is a bare shell and we haven't already staged this session. `farm resume`

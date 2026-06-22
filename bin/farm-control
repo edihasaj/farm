@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+# farm-control — one supervisor for a project run across farm panes.
+#
+# Usage:
+#   farm-control start [--pipeline] [--agents N] [--session farm] [--task-file file] [--no-workers] <repo> <task...>
+#   farm-control supervise <run-id>
+#   farm-control status [run-id]
+#   farm-control logs <run-id> [--lines N]
+#   farm-control inspect <run-id> [--lines N]
+#   farm-control pane <run-id> [supervisor|workers|all]
+#   farm-control list
+#   farm-control pause <run-id>
+#   farm-control resume <run-id>
+#   farm-control stop <run-id>
+#   farm-control retry <run-id> [--phase N|--all]
+#
+# The controller adds run-tagged farm-queue tasks, then launches farm-loop workers
+# in free tmux panes with FARM_LOOP_RUN=<run-id>. Those workers claim only this
+# run's tasks, so one project can be supervised without watching all 32 panes.
+set -euo pipefail
+
+FARM="${FARM_HOME:-$HOME/Projects/farm}"
+BIN="$(cd "$(dirname "$0")" && pwd)"
+QCMD="$BIN/farm-queue"
+LOOP="$BIN/farm-loop"
+VIEW="$BIN/farm-view"
+SELF="$BIN/farm-control"
+INSPECT="$BIN/farm-control-inspect"
+CONTROL="$FARM/control"
+RUNS="$CONTROL/runs"
+mkdir -p "$RUNS"
+
+die() { echo "farm-control: $*" >&2; exit 1; }
+usage() { sed -n '2,14p' "$0"; exit "${1:-0}"; }
+field() { sed -n "s/^$2: //p" "$1" | head -1; }
+quote() { printf "%q" "$1"; }
+slug() {
+  printf '%s' "$*" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-48
+}
+
+run_file() {
+  local id="$1" f
+  f="$RUNS/$id.run"
+  [ -f "$f" ] || die "no such run: $id"
+  printf '%s\n' "$f"
+}
+
+set_field() {
+  local file="$1" key="$2" value="$3" tmp="$file.tmp"
+  awk -v k="$key" -v v="$value" '
+    BEGIN { done = 0 }
+    $0 ~ "^" k ": " { print k ": " v; done = 1; next }
+    { print }
+    END { if (!done) print k ": " v }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+count_run_state() {
+  local state="$1" run="$2" phase="${3:-}" dir n=0 f
+  dir="$FARM/queue/$state"
+  [ -d "$dir" ] || { echo 0; return; }
+  for f in "$dir"/*.task; do
+    [ -e "$f" ] || continue
+    [ "$(field "$f" run)" = "$run" ] || continue
+    [ -z "$phase" ] || [ "$(field "$f" phase)" = "$phase" ] || continue
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+
+free_panes() {
+  local session="$1" exclude="${2:-}"
+  tmux list-panes -s -t "$session" -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
+    | awk -v ex="$exclude" '$1 != ex && $2 ~ /^(-?zsh|-?bash|-?sh|fish|login)$/ { print $1 }'
+}
+
+ensure_session() {
+  local session="$1" dir="$2" per="$3"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    return 0
+  fi
+  tmux new-session -d -s "$session" -x 480 -y 120 -c "$dir" -n F1
+  tmux set-option -t "$session" @farm 1
+  "$VIEW" "$per" "$session" "$dir" >/dev/null 2>&1 || true
+}
+
+record_run() {
+  local file="$1" id="$2" repo="$3" task="$4" agents="$5" session="$6" state="$7" task_ids="$8" mode="$9" manifest="${10:-}" start_dir="${11:-$HOME/Projects}"
+  {
+    echo "id: $id"
+    echo "state: $state"
+    echo "mode: $mode"
+    echo "repo: $repo"
+    echo "task: $task"
+    echo "agents: $agents"
+    echo "session: $session"
+    echo "start_dir: $start_dir"
+    echo "phase: 1"
+    echo "max_phase: 5"
+    echo "manifest: $manifest"
+    echo "task_ids: $task_ids"
+    echo "supervisor_pane: "
+    echo "worker_panes: "
+    echo "created: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$file"
+}
+
+pause_path() { printf '%s/%s.pause' "$RUNS" "$1"; }
+stop_path() { printf '%s/%s.stop' "$RUNS" "$1"; }
+
+stopped() { [ -f "$(stop_path "$1")" ]; }
+
+wait_if_paused() {
+  local id="$1" file="$2"
+  while [ -f "$(pause_path "$id")" ]; do
+    if stopped "$id"; then
+      set_field "$file" state "stopped"
+      return 130
+    fi
+    set_field "$file" state "paused"
+    sleep 1
+  done
+  return 0
+}
+
+launch_workers() {
+  local run="$1" agents="$2" session="$3" start_dir="$4" phase="${5:-}" exclude="${6:-}" pane cmd launched=0 touched="" free_count=0
+  free_count="$(free_panes "$session" "$exclude" | wc -l | tr -d ' ')"
+  [ "$free_count" -gt 0 ] || die "no free shell panes in tmux session '$session'"
+
+  while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    [ "$launched" -lt "$agents" ] || break
+    cmd="cd $(quote "$start_dir") && FARM_HOME=$(quote "$FARM") FARM_LOOP_RUN=$(quote "$run") FARM_LOOP_INTERVAL=5"
+    if [ -n "$phase" ]; then
+      cmd="$cmd FARM_LOOP_PHASE=$(quote "$phase")"
+    fi
+    if [ -n "${FARM_LOOP_SHIP:-}" ]; then
+      cmd="$cmd FARM_LOOP_SHIP=$(quote "$FARM_LOOP_SHIP")"
+    fi
+    cmd="$cmd $(quote "$BIN/farm-loop") --drain; printf '\\n[farm-control] run $run worker done rc=%s\\n' \"\$?\""
+    tmux send-keys -t "$pane" -l "$cmd"
+    tmux send-keys -t "$pane" Enter
+    touched="${touched:+$touched }$pane"
+    launched=$((launched + 1))
+  done < <(free_panes "$session" "$exclude")
+
+  [ "$launched" -gt 0 ] || die "could not launch workers"
+  echo "$touched"
+}
+
+launch_supervisor() {
+  local run="$1" session="$2" start_dir="$3" pane cmd
+  pane="$(free_panes "$session" | head -1)"
+  [ -n "$pane" ] || die "no free shell panes in tmux session '$session'"
+  cmd="cd $(quote "$start_dir") && FARM_HOME=$(quote "$FARM")"
+  if [ -n "${FARM_LOOP_SHIP:-}" ]; then
+    cmd="$cmd FARM_LOOP_SHIP=$(quote "$FARM_LOOP_SHIP")"
+  fi
+  cmd="$cmd $(quote "$SELF") supervise $(quote "$run"); printf '\\n[farm-control] supervisor $run done rc=%s\\n' \"\$?\""
+  tmux send-keys -t "$pane" -l "$cmd"
+  tmux send-keys -t "$pane" Enter
+  echo "$pane"
+}
+
+pipeline_task() {
+  local phase="$1" task="$2" manifest="${3:-}"
+  case "$phase" in
+    1) printf 'Plan this project task end to end, identify files/risks/tests, and write a concise plan before code. Also write implementation subtasks to %s, one shell-safe plain-text task per non-comment line. If this should stay single-agent, write exactly one line. Task: %s' "$manifest" "$task" ;;
+    2) printf 'Implement the planned change for this project task. Keep scope tight and run focused checks: %s' "$task" ;;
+    3) printf 'Security review and remediation for the current diff. Check secrets, injection, auth/authz, unsafe filesystem/shell/network behavior, and fix issues or write findings: %s' "$task" ;;
+    4) printf 'Code review pass for the current diff. Find bugs, regressions, missing tests, and consistency issues; fix what is safe and leave precise findings: %s' "$task" ;;
+    5) printf 'Final gate for this project task. Run the repo gate, prepare PR-ready handoff, and stop before push unless repo policy explicitly allows it: %s' "$task" ;;
+    *) die "unknown pipeline phase: $phase" ;;
+  esac
+}
+
+queue_pipeline_phase() {
+  local id="$1" phase="$2" repo="$3" task="$4" manifest="$5" existing tid prompt line tids=""
+  existing=$(( $(count_run_state pending "$id" "$phase") + $(count_run_state running "$id" "$phase") + $(count_run_state done "$id" "$phase") + $(count_run_state failed "$id" "$phase") ))
+  [ "$existing" -eq 0 ] || return 0
+  if [ "$phase" -eq 2 ] && [ -s "$manifest" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in ""|\#*) continue ;; esac
+      prompt="$(pipeline_task "$phase" "$line")"
+      tid="$("$QCMD" add --run "$id" --phase "$phase" "$repo" "$prompt")"
+      tids="${tids:+$tids }$tid"
+    done < "$manifest"
+    [ -n "$tids" ] || die "manifest had no runnable subtasks: $manifest"
+    echo "$tids"
+    return 0
+  fi
+  prompt="$(pipeline_task "$phase" "$task" "$manifest")"
+  tid="$("$QCMD" add --run "$id" --phase "$phase" "$repo" "$prompt")"
+  echo "$tid"
+}
+
+start() {
+  local agents=4 session="${FARM_SESSION:-farm}" no_workers=0 task_file="" per=8 start_dir="$HOME/Projects" pipeline=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agents) shift; agents="${1:?--agents needs count}" ;;
+      --agents=*) agents="${1#--agents=}" ;;
+      --session) shift; session="${1:?--session needs name}" ;;
+      --session=*) session="${1#--session=}" ;;
+      --task-file) shift; task_file="${1:?--task-file needs path}" ;;
+      --task-file=*) task_file="${1#--task-file=}" ;;
+      --start-dir) shift; start_dir="${1:?--start-dir needs path}" ;;
+      --start-dir=*) start_dir="${1#--start-dir=}" ;;
+      --layout) shift; per="${1:?--layout needs panes-per-tab}" ;;
+      --layout=*) per="${1#--layout=}" ;;
+      --pipeline) pipeline=1 ;;
+      --no-workers) no_workers=1 ;;
+      -h|--help) usage 0 ;;
+      --) shift; break ;;
+      -*) die "unknown start option: $1" ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  [[ "$agents" =~ ^[0-9]+$ ]] && [ "$agents" -ge 1 ] && [ "$agents" -le 32 ] \
+    || die "--agents must be 1..32"
+  local repo="${1:-}"; [ -n "$repo" ] || die "usage: farm-control start <repo> <task...>"
+  shift || true
+  local task="${*:-}"
+  [ -n "$task" ] || [ -n "$task_file" ] || die "missing task text or --task-file"
+  [ -z "$task_file" ] || [ -f "$task_file" ] || die "task file not found: $task_file"
+
+  local id base file tids="" line tid state panes mode="queue" manifest=""
+  base="$(date +%Y%m%d-%H%M%S)-$(slug "$repo $task")"
+  id="${FARM_CONTROL_RUN_ID:-$base}"
+  file="$RUNS/$id.run"
+  [ ! -e "$file" ] || die "run already exists: $id"
+
+  if [ "$pipeline" -eq 1 ]; then
+    [ -z "$task_file" ] || die "--pipeline takes one task, not --task-file"
+    mode="pipeline"
+    manifest="$RUNS/$id.subtasks"
+    tid="$("$QCMD" add --run "$id" --phase 1 "$repo" "$(pipeline_task 1 "$task" "$manifest")")"
+    tids="$tid"
+  elif [ -n "$task_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in ""|\#*) continue ;; esac
+      tid="$("$QCMD" add --run "$id" "$repo" "$line")"
+      tids="${tids:+$tids }$tid"
+    done < "$task_file"
+  else
+    tid="$("$QCMD" add --run "$id" "$repo" "$task")"
+    tids="$tid"
+  fi
+  [ -n "$tids" ] || die "no tasks queued"
+
+  state="queued"
+  record_run "$file" "$id" "$repo" "${task:-$task_file}" "$agents" "$session" "$state" "$tids" "$mode" "$manifest" "$start_dir"
+
+  if [ "$no_workers" -eq 0 ]; then
+    ensure_session "$session" "$start_dir" "$per"
+    if [ "$pipeline" -eq 1 ]; then
+      panes="$(launch_supervisor "$id" "$session" "$start_dir")"
+      set_field "$file" supervisor_pane "$panes"
+    else
+      panes="$(launch_workers "$id" "$agents" "$session" "$start_dir")"
+      set_field "$file" worker_panes "$panes"
+    fi
+    set_field "$file" state "running"
+    state="running"
+  fi
+
+  echo "run: $id"
+  echo "state: $state"
+  echo "tasks: $tids"
+  [ "$no_workers" -eq 1 ] || echo "workers: $(field "$file" worker_panes)"
+}
+
+status_one() {
+  local id="$1" file pending running failed done panes supervisor phase max_phase mode
+  file="$(run_file "$id")"
+  phase="$(field "$file" phase)"
+  max_phase="$(field "$file" max_phase)"
+  mode="$(field "$file" mode)"
+  pending="$(count_run_state pending "$id")"
+  running="$(count_run_state running "$id")"
+  failed="$(count_run_state failed "$id")"
+  done="$(count_run_state done "$id")"
+  panes="$(field "$file" worker_panes)"
+  supervisor="$(field "$file" supervisor_pane)"
+  echo "run: $id"
+  echo "state: $(field "$file" state)"
+  echo "mode: ${mode:-queue}"
+  echo "repo: $(field "$file" repo)"
+  echo "task: $(field "$file" task)"
+  if [ "$mode" = "pipeline" ] && [ -n "$phase" ]; then
+    echo "phase: $phase/${max_phase:-?}"
+  fi
+  echo "queue: pending $pending  running $running  failed $failed  done $done"
+  echo "supervisor: ${supervisor:-none}"
+  if [ -n "$supervisor" ]; then
+    tmux display-message -p -t "$supervisor" "  $supervisor #{pane_current_command} #{pane_current_path}" 2>/dev/null || true
+  fi
+  echo "workers: ${panes:-none}"
+  if [ -n "$panes" ]; then
+    for pane in $panes; do
+      tmux display-message -p -t "$pane" "  $pane #{pane_current_command} #{pane_current_path}" 2>/dev/null || true
+    done
+  fi
+}
+
+supervise_run() {
+  local id="$1" file repo task phase max_phase rc pending running failed done tid manifest agents session start_dir panes inline exclude
+  file="$(run_file "$id")"
+  [ "$(field "$file" mode)" = "pipeline" ] || die "run is not pipeline mode: $id"
+  repo="$(field "$file" repo)"
+  task="$(field "$file" task)"
+  manifest="$(field "$file" manifest)"
+  agents="$(field "$file" agents)"; [ -n "$agents" ] || agents=1
+  session="$(field "$file" session)"
+  start_dir="$(field "$file" start_dir)"; [ -n "$start_dir" ] || start_dir="$HOME/Projects"
+  exclude="${TMUX_PANE:-}"
+  phase="$(field "$file" phase)"; [ -n "$phase" ] || phase=1
+  max_phase="$(field "$file" max_phase)"; [ -n "$max_phase" ] || max_phase=5
+
+  while [ "$phase" -le "$max_phase" ]; do
+    if stopped "$id"; then
+      set_field "$file" state "stopped"
+      return 130
+    fi
+    wait_if_paused "$id" "$file" || return 130
+    tid="$(queue_pipeline_phase "$id" "$phase" "$repo" "$task" "$manifest" || true)"
+    [ -z "$tid" ] || set_field "$file" task_ids "$(field "$file" task_ids) $tid"
+    set_field "$file" phase "$phase"
+    set_field "$file" state "phase-$phase"
+    echo "farm-control: run=$id phase=$phase/$max_phase start"
+    inline=1
+    panes=""
+    if [ "$agents" -gt 1 ] && [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
+      set +e
+      panes="$(launch_workers "$id" "$agents" "$session" "$start_dir" "$phase" "$exclude" 2>/dev/null)"
+      rc=$?
+      set -e
+      if [ "$rc" -eq 0 ] && [ -n "$panes" ]; then
+        inline=0
+        set_field "$file" worker_panes "$panes"
+      fi
+    fi
+    if [ "$inline" -eq 1 ]; then
+      set +e
+      FARM_HOME="$FARM" FARM_LOOP_RUN="$id" FARM_LOOP_PHASE="$phase" "$LOOP" --drain
+      rc=$?
+      set -e
+    else
+      rc=0
+      while :; do
+        if stopped "$id"; then
+          set_field "$file" state "stopped"
+          return 130
+        fi
+        wait_if_paused "$id" "$file" || return 130
+        failed="$(count_run_state failed "$id" "$phase")"
+        pending="$(count_run_state pending "$id" "$phase")"
+        running="$(count_run_state running "$id" "$phase")"
+        if [ "$failed" -ne 0 ] || { [ "$pending" -eq 0 ] && [ "$running" -eq 0 ]; }; then
+          break
+        fi
+        sleep 1
+      done
+    fi
+    failed="$(count_run_state failed "$id" "$phase")"
+    pending="$(count_run_state pending "$id" "$phase")"
+    running="$(count_run_state running "$id" "$phase")"
+    done="$(count_run_state done "$id" "$phase")"
+    echo "farm-control: run=$id phase=$phase done=$done failed=$failed pending=$pending running=$running"
+    if [ "$rc" -ne 0 ] || [ "$failed" -ne 0 ]; then
+      set_field "$file" state "failed"
+      return 1
+    fi
+    if [ "$pending" -ne 0 ] || [ "$running" -ne 0 ]; then
+      set_field "$file" state "blocked"
+      return 1
+    fi
+    phase=$((phase + 1))
+    set_field "$file" phase "$phase"
+  done
+  set_field "$file" phase "$max_phase"
+  set_field "$file" state "complete"
+  echo "farm-control: complete $id"
+}
+
+list_runs() {
+  local f id pending running failed done
+  for f in "$RUNS"/*.run; do
+    [ -e "$f" ] || { echo "no runs"; return 0; }
+    id="$(field "$f" id)"
+    pending="$(count_run_state pending "$id")"
+    running="$(count_run_state running "$id")"
+    failed="$(count_run_state failed "$id")"
+    done="$(count_run_state done "$id")"
+    printf '%-54s %-8s p:%s r:%s f:%s d:%s  %s  %s\n' \
+      "$id" "$(field "$f" state)" "$pending" "$running" "$failed" "$done" \
+      "$(field "$f" repo)" "$(field "$f" task)"
+  done
+}
+
+pause_run() {
+  local id="$1" file
+  file="$(run_file "$id")"
+  : > "$(pause_path "$id")"
+  set_field "$file" state "paused"
+  echo "paused: $id"
+}
+
+resume_run() {
+  local id="$1" file
+  file="$(run_file "$id")"
+  rm -f "$(pause_path "$id")"
+  set_field "$file" state "running"
+  echo "resumed: $id"
+}
+
+stop_run() {
+  local id="$1" file panes supervisor pane
+  file="$(run_file "$id")"
+  : > "$(stop_path "$id")"
+  panes="$(field "$file" worker_panes)"
+  supervisor="$(field "$file" supervisor_pane)"
+  for pane in $supervisor; do
+    tmux send-keys -t "$pane" C-c 2>/dev/null || true
+  done
+  for pane in $panes; do
+    tmux send-keys -t "$pane" C-c 2>/dev/null || true
+  done
+  rm -f "$(pause_path "$id")"
+  set_field "$file" state "stopped"
+  echo "stopped: $id"
+}
+
+retry_run() {
+  local id="$1" file phase="" all=0 state dir f base task_phase count=0
+  shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --phase) shift; phase="${1:?--phase needs number}" ;;
+      --phase=*) phase="${1#--phase=}" ;;
+      --all) all=1 ;;
+      *) die "unknown retry option: $1" ;;
+    esac
+    shift
+  done
+
+  file="$(run_file "$id")"
+  if [ "$all" -eq 0 ]; then
+    phase="${phase:-$(field "$file" phase)}"
+    [ -n "$phase" ] || die "run has no phase; use --all"
+  fi
+
+  rm -f "$(pause_path "$id")" "$(stop_path "$id")"
+  mkdir -p "$FARM/queue/pending"
+  for state in failed running; do
+    dir="$FARM/queue/$state"
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*.task; do
+      [ -e "$f" ] || continue
+      [ "$(field "$f" run)" = "$id" ] || continue
+      task_phase="$(field "$f" phase)"
+      [ "$all" -eq 1 ] || [ "$task_phase" = "$phase" ] || continue
+      base="$(basename "$f")"
+      mv "$f" "$FARM/queue/pending/$base"
+      count=$((count + 1))
+    done
+  done
+
+  [ "$all" -eq 1 ] || set_field "$file" phase "$phase"
+  set_field "$file" worker_panes ""
+  set_field "$file" supervisor_pane ""
+  set_field "$file" state "running"
+  echo "retry: $id  requeued=$count${phase:+  phase=$phase}"
+  echo "next: farm-control supervise $id"
+}
+
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  start|run) start "$@" ;;
+  ship) start --pipeline "$@" ;;
+  supervise) supervise_run "${1:?usage: farm-control supervise <run-id>}" ;;
+  status) if [ $# -gt 0 ]; then status_one "$1"; else list_runs; fi ;;
+  logs|inspect|pane) exec "$INSPECT" "$cmd" "$@" ;;
+  list|ls) list_runs ;;
+  pause) pause_run "${1:?usage: farm-control pause <run-id>}" ;;
+  resume) resume_run "${1:?usage: farm-control resume <run-id>}" ;;
+  stop) stop_run "${1:?usage: farm-control stop <run-id>}" ;;
+  retry) id="${1:?usage: farm-control retry <run-id> [--phase N|--all]}"; shift; retry_run "$id" "$@" ;;
+  -h|--help|help) usage 0 ;;
+  *) die "unknown command: $cmd (try --help)" ;;
+esac

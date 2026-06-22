@@ -36,8 +36,11 @@ shipyard <repo> <task>
 | `bin/farm-risk-snapshot` | throttled safety snapshot before copy-mode entry, keeping mouse copy UX while making tmux crashes recoverable |
 | `bin/farm-queue` | file-based task queue (`queue/pending→running→done\|failed`); tasks carry their repo, so one queue feeds many projects |
 | `bin/farm-loop` | agent loop: drains the queue through `shipyard -p`; run one per pane for parallel workers |
+| `bin/farm-control` | supervisor for one project run: enqueue run-tagged tasks, run ordered pipeline phases, spawn bounded workers into free tmux panes, then `status` / `pause` / `resume` / `stop` from one command |
+| `bin/farm-status` | low-latency status for terminal/agents (`--json`) and a phone-friendly local web dashboard (`serve`) |
 | `bin/farm-schedule` | cron wrapper: runs `farm-loop --drain` on an interval so the backlog empties unattended (overlap-locked, logged) |
 | `tests/test-farm-loop.sh` | queue + loop test suite (stubbed shipyard; covers claims, failure, retry, concurrency, interrupt) |
+| `tests/test-farm-control.sh` | controller test suite (run-scoped claims, pause/resume state, scratch tmux worker launch) |
 | `tests/test-farm-schedule.sh` | scheduler test suite (line generation, drain, overlap lock — never touches the real crontab) |
 | `config/tmux.conf` | tmux config for the farm (Ghostty-tuned: native mouse copy, kitty keys, even grids) |
 | `hooks/` | optional always-on checks (e.g. security scan on diff) |
@@ -128,6 +131,68 @@ cron lines untouched.
 
 Tests: `tests/test-farm-loop.sh` + `tests/test-farm-schedule.sh` (no real
 agents; `shipyard` is stubbed, the real crontab is never touched).
+
+## Supervisor runs
+
+Use `farm-control` when a project needs one visible control point instead of
+manually supervising many panes. It creates a run id, tags queued tasks with
+that run, and launches either a supervisor or `farm-loop` workers into free
+shell panes with `FARM_LOOP_RUN=<id>`, so they only claim work for that project.
+
+```sh
+farm-control ship app-repo "ship account deletion end to end"
+farm-control status <run-id>
+farm-control pause <run-id>     # supervisor/workers stop claiming new work
+farm-control resume <run-id>
+farm-control stop <run-id>      # set stop flag + Ctrl-C supervisor/workers
+farm-control retry <run-id>     # requeue failed/running work for current phase
+farm-control logs <run-id> --lines 80
+farm-control inspect <run-id> --lines 40
+farm-control pane <run-id> all 60
+farm-status                         # fastest manual status
+farm-status --json                  # agent-friendly status
+farm-status serve --host 0.0.0.0 --port 8765   # phone: http://<mac-ip>:8765
+
+# manual fanout: each non-comment line becomes one run-tagged task
+farm-control start --agents 4 --task-file /tmp/subtasks.txt app-repo
+```
+
+`ship` is the high-level path for "take this project task end to end". It turns
+one task into ordered phases:
+
+1. plan
+2. implement
+3. security review/remediation
+4. code review/remediation
+5. final gate / PR-ready handoff
+
+The planning phase is asked to write implementation subtasks to
+`control/runs/<run-id>.subtasks`, one non-comment line per task. Phase 2 reads
+that manifest and fans those subtasks out as run/phase-tagged queue items; if
+the planner writes one line, the run stays single-agent. Later phases are not
+claimable until earlier phases finish.
+
+When `--agents > 1`, the supervisor tries to launch phase workers into free
+tmux shell panes and waits until that phase drains. If no spare pane is
+available, it falls back to draining inline. Existing busy panes are left alone.
+`pause` is a run-state file honored by the supervisor and workers; in-flight
+agent work can finish, but no new queue item is claimed until `resume`. `stop`
+sets a stop file and sends Ctrl-C to the recorded supervisor/worker panes.
+`retry` clears pause/stop state, requeues failed/running tasks for the current
+phase (or `--phase N` / `--all`), and resets stale pane assignments so the run
+can be supervised again. `status` shows the supervisor pane, worker panes,
+current phase, and queue counts. `logs` tails run task logs from `queue/logs/`;
+`pane` captures recent tmux scrollback from the recorded supervisor/workers;
+`inspect` combines status, task list, manifest, logs, and pane tails into one
+run view. `--agents` is bounded to 1..32. Run state lives under `control/runs/`
+(machine-local, gitignored); task logs still live in `queue/logs/`.
+
+Tests: `tests/test-farm-control.sh` + the queue/loop/scheduler tests.
+
+For the lowest-latency check path, use `farm-status`. It reads the farm state
+files directly, so agents can run `farm-status --json` without attaching to
+tmux, and a phone can open the tiny local dashboard from `farm-status serve`.
+The web view auto-refreshes and exposes `/api/runs` for scripted checks.
 
 ## Push policy (the safety rail)
 

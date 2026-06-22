@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# farm-control-inspect — observability helpers for farm-control runs.
+set -euo pipefail
+
+FARM="${FARM_HOME:-$HOME/Projects/farm}"
+BIN="$(cd "$(dirname "$0")" && pwd)"
+RUNS="$FARM/control/runs"
+
+die() { echo "farm-control: $*" >&2; exit 1; }
+field() { sed -n "s/^$2: //p" "$1" | head -1; }
+
+run_file() {
+  local id="$1" f
+  f="$RUNS/$id.run"
+  [ -f "$f" ] || die "no such run: $id"
+  printf '%s\n' "$f"
+}
+
+run_task_files() {
+  local id="$1" state dir f
+  for state in pending running failed done; do
+    dir="$FARM/queue/$state"
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*.task; do
+      [ -e "$f" ] || continue
+      [ "$(field "$f" run)" = "$id" ] || continue
+      printf '%s %s\n' "$state" "$f"
+    done
+  done | sort -k2
+}
+
+task_id_from_path() {
+  local path="$1" base
+  base="$(basename "$path")"
+  printf '%s\n' "${base%.task}"
+}
+
+parse_lines() {
+  local lines=40
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lines) shift; lines="${1:?--lines needs count}" ;;
+      --lines=*) lines="${1#--lines=}" ;;
+      -n) shift; lines="${1:?-n needs count}" ;;
+      -n=*) lines="${1#-n=}" ;;
+      *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+  [[ "$lines" =~ ^[0-9]+$ ]] && [ "$lines" -ge 1 ] || die "lines must be >= 1"
+  echo "$lines"
+}
+
+print_run_tasks() {
+  local id="$1" state path tid repo task phase
+  run_task_files "$id" | while read -r state path; do
+    tid="$(task_id_from_path "$path")"
+    repo="$(field "$path" repo)"
+    task="$(field "$path" task)"
+    phase="$(field "$path" phase)"
+    printf '%-8s phase=%-3s %s  %s  %s\n' "$state" "${phase:-.}" "$tid" "${repo:-<url>}" "$task"
+  done
+}
+
+logs_run() {
+  local id="$1"; shift || true
+  local lines state path tid log saw=0
+  run_file "$id" >/dev/null
+  lines="$(parse_lines "$@")"
+  while read -r state path; do
+    tid="$(task_id_from_path "$path")"
+    log="$FARM/queue/logs/$tid.log"
+    [ -f "$log" ] || continue
+    saw=1
+    echo "== $tid ($state) =="
+    tail -n "$lines" "$log"
+  done < <(run_task_files "$id")
+  if [ "$saw" -eq 0 ]; then
+    echo "no logs for run: $id"
+  fi
+}
+
+pane_targets() {
+  local file="$1" which="${2:-all}" supervisor workers
+  supervisor="$(field "$file" supervisor_pane)"
+  workers="$(field "$file" worker_panes)"
+  case "$which" in
+    supervisor) echo "$supervisor" ;;
+    workers|worker) echo "$workers" ;;
+    all) echo "$supervisor $workers" ;;
+    *) die "unknown pane group: $which" ;;
+  esac
+}
+
+pane_run() {
+  local id="$1" which="${2:-all}" lines="${3:-60}" file pane
+  file="$(run_file "$id")"
+  [[ "$lines" =~ ^[0-9]+$ ]] && [ "$lines" -ge 1 ] || die "lines must be >= 1"
+  for pane in $(pane_targets "$file" "$which"); do
+    [ -n "$pane" ] || continue
+    echo "== pane $pane =="
+    tmux capture-pane -p -t "$pane" -S "-$lines" 2>/dev/null || echo "(pane unavailable)"
+  done
+}
+
+inspect_run() {
+  local id="$1"; shift || true
+  local lines file manifest
+  file="$(run_file "$id")"
+  lines="$(parse_lines "$@")"
+  "$BIN/farm-control" status "$id"
+  echo
+  echo "tasks:"
+  print_run_tasks "$id"
+  manifest="$(field "$file" manifest)"
+  if [ -n "$manifest" ] && [ -f "$manifest" ]; then
+    echo
+    echo "manifest: $manifest"
+    sed -n '1,40p' "$manifest"
+  fi
+  echo
+  echo "logs:"
+  logs_run "$id" --lines "$lines"
+  echo
+  echo "panes:"
+  pane_run "$id" all "$lines"
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  logs) id="${1:?usage: farm-control logs <run-id> [--lines N]}"; shift; logs_run "$id" "$@" ;;
+  inspect) id="${1:?usage: farm-control inspect <run-id> [--lines N]}"; shift; inspect_run "$id" "$@" ;;
+  pane) id="${1:?usage: farm-control pane <run-id> [supervisor|workers|all] [lines]}"; shift; pane_run "$id" "${1:-all}" "${2:-60}" ;;
+  *) die "unknown inspect command: ${cmd:-<empty>}" ;;
+esac
