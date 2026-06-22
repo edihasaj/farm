@@ -11,6 +11,11 @@ This scans those logs for sessions touched within a recent window, dedupes to th
 newest per (tool, project), and either prints them, stages the resume command into
 the farm panes (typed, NOT executed), or launches them.
 
+It also reconciles against the last tmux-resurrect snapshot: a session can sit
+ALIVE-but-idle in a pane for days, so its log mtime goes stale and a pure
+recency-window scan drops it after a reboot. The resurrect save records the pane
+commands that were actually running, so we fold those back in regardless of mtime.
+
 Usage:
     farm-resume [list]          show recent resumable sessions + handoff (default)
     farm-resume stage           type `cd <dir> && <resume>` into free farm panes (no Enter)
@@ -22,12 +27,19 @@ Usage:
 Safety: stage/go only target *free* panes (a shell, not a running agent), and never
 touch a pane that already has claude/codex running.
 """
-import os, sys, json, glob, subprocess, time
+import os, re, sys, json, glob, subprocess, time
 
 HOME = os.path.expanduser("~")
 CLAUDE_DIR = f"{HOME}/.claude/projects"
 CODEX_DIR = f"{HOME}/.codex/sessions"
+RESURRECT_DIRS = (f"{HOME}/.local/share/tmux/resurrect", f"{HOME}/.tmux/resurrect")
 SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
+
+# `claude --resume <uuid>` / `codex resume <uuid>` as it appears in a resurrect
+# pane line (codex is wrapped as `node .../codex resume <uuid>`; search anywhere).
+RESUME_RE = re.compile(
+    r"\b(claude --resume|codex resume)\s+"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
 
 
 def _first_field(path, key, max_lines=80):
@@ -83,36 +95,119 @@ def _first_user_task(path, max_lines=400):
     return ""
 
 
+def _resurrect_saves():
+    """All resurrect save files, newest first, as (mtime, path)."""
+    files = []
+    for d in RESURRECT_DIRS:
+        for p in glob.glob(os.path.join(d, "tmux_resurrect_*.txt")):
+            try:
+                files.append((os.path.getmtime(p), p))
+            except OSError:
+                continue
+    files.sort(reverse=True)
+    return files
+
+
+def _parse_resume_lines(path):
+    """Pull (tool, cwd, sid) from every agent pane recorded in a resurrect save."""
+    out = []
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                if not line.startswith("pane\t"):
+                    continue
+                m = RESUME_RE.search(line)
+                if not m:
+                    continue
+                tool = "claude" if m.group(1).startswith("claude") else "codex"
+                sid = m.group(2)
+                # pane_current_path is its own tab field; pick the first field that
+                # is an existing dir under HOME (skips the command field, which only
+                # *contains* paths like .../bin/codex).
+                cwd = ""
+                for fld in line.rstrip("\n").split("\t"):
+                    fld = fld.strip().lstrip(":")
+                    if fld.startswith(HOME + "/") and os.path.isdir(fld):
+                        cwd = fld
+                        break
+                out.append((tool, cwd, sid))
+    except OSError:
+        pass
+    return out
+
+
+def _resurrect_live(gap_seconds=300):
+    """Agent sessions that were open in farm panes around the last reboot/crash.
+
+    continuum saves the farm layout ~once a minute. A reboot (or long sleep) shows
+    up as a GAP in those save timestamps; the save right before the gap is the last
+    snapshot of what was actually running. We union it with the newest save (current
+    state). Reading saved pane commands — not log mtimes — means an agent that idled
+    in a pane for days still comes back: its log is stale, but it was clearly live.
+    """
+    saves = _resurrect_saves()
+    if not saves:
+        return []
+    picks = [saves[0][1]]  # newest save = current state
+    for i in range(1, len(saves)):
+        if saves[i - 1][0] - saves[i][0] > gap_seconds:
+            picks.append(saves[i][1])  # last save before the gap = pre-reboot state
+            break
+    seen, recs = set(), []
+    for p in picks:
+        for tool, cwd, sid in _parse_resume_lines(p):
+            if sid in seen:
+                continue
+            seen.add(sid)
+            recs.append((tool, cwd, sid))
+    return recs
+
+
 def scan(since_hours):
     cutoff = time.time() - since_hours * 3600
     found = []  # (mtime, tool, cwd, session_id, task, path)
+    by_sid = {}  # sid -> (mtime, tool, cwd, path) for ALL logs, ignoring the window
 
     for p in glob.glob(f"{CLAUDE_DIR}/*/*.jsonl"):
         try:
             mt = os.path.getmtime(p)
         except OSError:
             continue
-        if mt < cutoff:
-            continue
         cwd = _first_field(p, "cwd") or ""
         sid = os.path.basename(p)[:-6]  # strip .jsonl
-        found.append((mt, "claude", cwd, sid, _first_user_task(p), p))
+        by_sid[sid] = (mt, "claude", cwd, p)
+        if mt >= cutoff:
+            found.append((mt, "claude", cwd, sid, _first_user_task(p), p))
 
     for p in glob.glob(f"{CODEX_DIR}/*/*/*/*.jsonl"):
         try:
             mt = os.path.getmtime(p)
         except OSError:
             continue
-        if mt < cutoff:
-            continue
         cwd = _first_field(p, "cwd") or ""
         base = os.path.basename(p)
-        sid = base.split("-")[-1][:-6] if base.endswith(".jsonl") else base
         # codex uuid is the trailing 5 dash-groups; recover it robustly
         stem = base[:-6]
         parts = stem.split("-")
         sid = "-".join(parts[-5:]) if len(parts) >= 5 else stem
-        found.append((mt, "codex", cwd, sid, _first_user_task(p), p))
+        by_sid[sid] = (mt, "codex", cwd, p)
+        if mt >= cutoff:
+            found.append((mt, "codex", cwd, sid, _first_user_task(p), p))
+
+    # Reconcile with the resurrect snapshot: bring back any session that was open in
+    # a pane around the reboot but fell outside the mtime window (idle-but-live).
+    have = {r[3] for r in found}
+    for tool, cwd, sid in _resurrect_live():
+        if sid in have:
+            continue
+        rec = by_sid.get(sid)
+        if rec:
+            mt, _tool, log_cwd, p = rec
+            found.append((mt, tool, log_cwd or cwd, sid, _first_user_task(p), p))
+        elif cwd:
+            # log gone/unmatched but the resurrect line still tells us how to resume
+            found.append((0.0, tool, cwd, sid, "", None))
+        have.add(sid)
 
     # newest first, dedupe to newest per (tool, cwd)
     found.sort(reverse=True)
