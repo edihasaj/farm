@@ -1,0 +1,9 @@
+#!/bin/bash
+# macpaste — pipe stdin to the MacBook's clipboard over Tailscale SSH.
+# Used by the farm tmux.conf copy bindings so copy works over mosh (which does NOT relay
+# tmux's OSC52). Fast after the first call via a persistent SSH control connection.
+# Override the target with FARM_CLIPBOARD_HOST if your laptop has a different name.
+host="${FARM_CLIPBOARD_HOST:-edis-macbook-pro}"
+exec ssh -o BatchMode=yes -o ConnectTimeout=3 \
+  -o ControlMaster=auto -o ControlPath=/tmp/cm-macpaste -o ControlPersist=300 \
+  "$host" pbcopy
