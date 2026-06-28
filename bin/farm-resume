@@ -35,11 +35,30 @@ CODEX_DIR = f"{HOME}/.codex/sessions"
 RESURRECT_DIRS = (f"{HOME}/.local/share/tmux/resurrect", f"{HOME}/.tmux/resurrect")
 SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
 
+# Account routing: `--work`/`--second` runs the agent against an alternate home
+# (claude -> CLAUDE_CONFIG_DIR=~/.claude-work, codex -> CODEX_HOME=~/.codex-work),
+# each with its OWN sessions store. The shell function consumes `--work` as env, so
+# it never reaches the resurrect pane command — the home a session log lives under
+# is the only signal of which account it was. We scan both homes, tag every session
+# with its account, and resume_cmd re-adds `--work` so a work session comes back on
+# the work account instead of silently dropping to the default one.
+CLAUDE_PROJECT_DIRS = [(CLAUDE_DIR, None), (f"{HOME}/.claude-work/projects", "work")]
+CODEX_SESSION_DIRS = [(CODEX_DIR, None), (f"{HOME}/.codex-work/sessions", "work")]
+
 # `claude --resume <uuid>` / `codex resume <uuid>` as it appears in a resurrect
 # pane line (codex is wrapped as `node .../codex resume <uuid>`; search anywhere).
 RESUME_RE = re.compile(
     r"\b(claude --resume|codex resume)\s+"
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
+
+# A *fresh* agent pane carries no resume uuid — e.g. `claude --dangerously-...` or
+# `node .../codex --yolo ...`. These are exactly the panes that vanish on reboot
+# when they'd idled long enough for the log mtime to fall outside the scan window:
+# RESUME_RE can't recover them (no uuid), so we match the bare command and resolve
+# the newest log for the pane's cwd instead. Lowercase to skip window titles like
+# "Claude Code". codex matches its binary path too (.../bin/codex).
+BARE_CLAUDE_RE = re.compile(r"(?:^|[\s:/])claude(?:\s|$)")
+BARE_CODEX_RE = re.compile(r"(?:^|[\s:/])codex(?:\s|$|--)")
 
 
 def _first_field(path, key, max_lines=80):
@@ -109,7 +128,12 @@ def _resurrect_saves():
 
 
 def _parse_resume_lines(path):
-    """Pull (tool, cwd, sid) from every agent pane recorded in a resurrect save."""
+    """Pull (tool, cwd, sid) from every agent pane recorded in a resurrect save.
+
+    sid is the resume uuid when the pane was launched via `--resume`; for a *fresh*
+    agent pane (bare `claude`/`codex`, no uuid) sid is None — the caller resolves it
+    to the newest log for `cwd`.
+    """
     out = []
     try:
         with open(path, "r", errors="ignore") as f:
@@ -117,10 +141,15 @@ def _parse_resume_lines(path):
                 if not line.startswith("pane\t"):
                     continue
                 m = RESUME_RE.search(line)
-                if not m:
+                if m:
+                    tool = "claude" if m.group(1).startswith("claude") else "codex"
+                    sid = m.group(2)
+                elif BARE_CLAUDE_RE.search(line):
+                    tool, sid = "claude", None
+                elif BARE_CODEX_RE.search(line):
+                    tool, sid = "codex", None
+                else:
                     continue
-                tool = "claude" if m.group(1).startswith("claude") else "codex"
-                sid = m.group(2)
                 # pane_current_path is its own tab field; pick the first field that
                 # is an existing dir under HOME (skips the command field, which only
                 # *contains* paths like .../bin/codex).
@@ -130,6 +159,8 @@ def _parse_resume_lines(path):
                     if fld.startswith(HOME + "/") and os.path.isdir(fld):
                         cwd = fld
                         break
+                if sid is None and not cwd:
+                    continue  # nothing to resolve a fresh agent against
                 out.append((tool, cwd, sid))
     except OSError:
         pass
@@ -156,64 +187,92 @@ def _resurrect_live(gap_seconds=300):
     seen, recs = set(), []
     for p in picks:
         for tool, cwd, sid in _parse_resume_lines(p):
-            if sid in seen:
+            key = sid or (tool, cwd)  # fresh agents have no uuid; dedupe by cwd
+            if key in seen:
                 continue
-            seen.add(sid)
+            seen.add(key)
             recs.append((tool, cwd, sid))
     return recs
 
 
 def scan(since_hours):
     cutoff = time.time() - since_hours * 3600
-    found = []  # (mtime, tool, cwd, session_id, task, path)
-    by_sid = {}  # sid -> (mtime, tool, cwd, path) for ALL logs, ignoring the window
+    found = []  # (mtime, tool, cwd, session_id, task, path, account)
+    by_sid = {}  # sid -> (mtime, tool, cwd, path, account); ALL logs, ignores window
+    by_cwd = {}  # (tool, cwd) -> (mtime, sid, path, account) newest; fresh-agent fold-in
 
-    for p in glob.glob(f"{CLAUDE_DIR}/*/*.jsonl"):
-        try:
-            mt = os.path.getmtime(p)
-        except OSError:
-            continue
-        cwd = _first_field(p, "cwd") or ""
-        sid = os.path.basename(p)[:-6]  # strip .jsonl
-        by_sid[sid] = (mt, "claude", cwd, p)
-        if mt >= cutoff:
-            found.append((mt, "claude", cwd, sid, _first_user_task(p), p))
+    def _note_cwd(tool, cwd, mt, sid, p, account):
+        if not cwd:
+            return
+        cur = by_cwd.get((tool, cwd))
+        if cur is None or mt > cur[0]:
+            by_cwd[(tool, cwd)] = (mt, sid, p, account)
 
-    for p in glob.glob(f"{CODEX_DIR}/*/*/*/*.jsonl"):
-        try:
-            mt = os.path.getmtime(p)
-        except OSError:
-            continue
-        cwd = _first_field(p, "cwd") or ""
-        base = os.path.basename(p)
-        # codex uuid is the trailing 5 dash-groups; recover it robustly
-        stem = base[:-6]
-        parts = stem.split("-")
-        sid = "-".join(parts[-5:]) if len(parts) >= 5 else stem
-        by_sid[sid] = (mt, "codex", cwd, p)
-        if mt >= cutoff:
-            found.append((mt, "codex", cwd, sid, _first_user_task(p), p))
+    for base_dir, account in CLAUDE_PROJECT_DIRS:
+        for p in glob.glob(f"{base_dir}/*/*.jsonl"):
+            try:
+                mt = os.path.getmtime(p)
+            except OSError:
+                continue
+            cwd = _first_field(p, "cwd") or ""
+            sid = os.path.basename(p)[:-6]  # strip .jsonl
+            by_sid[sid] = (mt, "claude", cwd, p, account)
+            _note_cwd("claude", cwd, mt, sid, p, account)
+            if mt >= cutoff:
+                found.append((mt, "claude", cwd, sid, _first_user_task(p), p, account))
+
+    for base_dir, account in CODEX_SESSION_DIRS:
+        for p in glob.glob(f"{base_dir}/*/*/*/*.jsonl"):
+            try:
+                mt = os.path.getmtime(p)
+            except OSError:
+                continue
+            cwd = _first_field(p, "cwd") or ""
+            base = os.path.basename(p)
+            # codex uuid is the trailing 5 dash-groups; recover it robustly
+            stem = base[:-6]
+            parts = stem.split("-")
+            sid = "-".join(parts[-5:]) if len(parts) >= 5 else stem
+            by_sid[sid] = (mt, "codex", cwd, p, account)
+            _note_cwd("codex", cwd, mt, sid, p, account)
+            if mt >= cutoff:
+                found.append((mt, "codex", cwd, sid, _first_user_task(p), p, account))
 
     # Reconcile with the resurrect snapshot: bring back any session that was open in
     # a pane around the reboot but fell outside the mtime window (idle-but-live).
     have = {r[3] for r in found}
     for tool, cwd, sid in _resurrect_live():
+        if sid is None:
+            # fresh agent (no uuid in the pane command): resolve the newest log for
+            # this cwd, regardless of mtime — recovers panes that idled past the
+            # scan window, which RESUME_RE can't reach. Account comes from whichever
+            # home that newest log lived under.
+            rec = by_cwd.get((tool, cwd))
+            if not rec:
+                continue
+            mt, sid, p, account = rec
+            if sid in have:
+                continue
+            found.append((mt, tool, cwd, sid, _first_user_task(p), p, account))
+            have.add(sid)
+            continue
         if sid in have:
             continue
         rec = by_sid.get(sid)
         if rec:
-            mt, _tool, log_cwd, p = rec
-            found.append((mt, tool, log_cwd or cwd, sid, _first_user_task(p), p))
+            mt, _tool, log_cwd, p, account = rec
+            found.append((mt, tool, log_cwd or cwd, sid, _first_user_task(p), p, account))
         elif cwd:
             # log gone/unmatched but the resurrect line still tells us how to resume
-            found.append((0.0, tool, cwd, sid, "", None))
+            found.append((0.0, tool, cwd, sid, "", None, None))
         have.add(sid)
 
-    # newest first, dedupe to newest per (tool, cwd)
+    # newest first, dedupe to newest per (tool, cwd, account) — a project open under
+    # BOTH the default and the work account brings back both panes.
     found.sort(reverse=True)
     seen, out = set(), []
     for rec in found:
-        key = (rec[1], rec[2])
+        key = (rec[1], rec[2], rec[6])
         if key in seen:
             continue
         seen.add(key)
@@ -274,17 +333,20 @@ def _claude_permission_mode(path):
     return mode
 
 
-def resume_cmd(tool, cwd, sid, path=None):
+def resume_cmd(tool, cwd, sid, path=None, account=None):
     short = cwd.replace(HOME, "~")
+    # `--work` is the cld/cdx shell-function flag that routes to the alternate
+    # account home; place it right after the binary so the function consumes it.
+    acct = " --work" if account == "work" else ""
     if tool == "claude":
-        cmd = f"cd {short} && claude --resume {sid}"
+        cmd = f"cd {short} && claude{acct} --resume {sid}"
         mode = _claude_permission_mode(path) if path else None
         if mode == "bypassPermissions":
             cmd += " --dangerously-skip-permissions"
         elif mode and mode != "default":
             cmd += f" --permission-mode {mode}"
         return cmd
-    cmd = f"cd {short} && codex resume {sid}"
+    cmd = f"cd {short} && codex{acct} resume {sid}"
     if path:
         model, effort = _codex_model_effort(path)
         if model:
@@ -342,17 +404,18 @@ def main():
         if as_json:
             print(json.dumps([
                 {"mtime": m, "tool": t, "cwd": c, "session": s, "task": tk,
-                 "cmd": resume_cmd(t, c, s, _p)}
-                for (m, t, c, s, tk, _p) in sessions], indent=2))
+                 "account": _a, "cmd": resume_cmd(t, c, s, _p, _a)}
+                for (m, t, c, s, tk, _p, _a) in sessions], indent=2))
             return 0
         print(f"Recent resumable sessions (last {since:g}h, newest per project):\n")
-        for (m, t, c, s, tk, _p) in sessions:
+        for (m, t, c, s, tk, _p, _a) in sessions:
             ago = (time.time() - m) / 3600
             tag = "🟣claude" if t == "claude" else "🟢codex "
-            print(f"  {tag}  {c.replace(HOME, '~'):<34}  {ago:4.1f}h ago")
+            acct = "  ·work" if _a == "work" else ""
+            print(f"  {tag}  {c.replace(HOME, '~'):<34}  {ago:4.1f}h ago{acct}")
             if tk:
                 print(f"           ↳ {tk}")
-            print(f"           {resume_cmd(t, c, s, _p)}\n")
+            print(f"           {resume_cmd(t, c, s, _p, _a)}\n")
         print("Bring them back:  farm-resume stage   (type, you hit Enter)")
         print("              or:  farm-resume go      (launch now)")
         return 0
@@ -366,15 +429,15 @@ def main():
     if not panes:
         print(f"farm-resume: no free panes in '{session}' "
               f"(all panes busy). Sessions to resume manually:\n")
-        for (m, t, c, s, tk, _p) in sessions:
-            print("  " + resume_cmd(t, c, s, _p))
+        for (m, t, c, s, tk, _p, _a) in sessions:
+            print("  " + resume_cmd(t, c, s, _p, _a))
         return 1
 
     n = min(len(panes), len(sessions))
     for i in range(n):
         pane = panes[i]
-        (_m, t, c, s, _tk, _p) = sessions[i]
-        cmd = resume_cmd(t, c, s, _p)
+        (_m, t, c, s, _tk, _p, _a) = sessions[i]
+        cmd = resume_cmd(t, c, s, _p, _a)
         tmux("send-keys", "-t", f"{session}:{pane}", "-l", cmd)
         if mode == "go":
             tmux("send-keys", "-t", f"{session}:{pane}", "Enter")
@@ -382,8 +445,8 @@ def main():
         print(f"{verb}  {session}:{pane}  <- {cmd}")
     if len(sessions) > n:
         print(f"\n{len(sessions) - n} more session(s) — not enough free panes:")
-        for (m, t, c, s, tk, _p) in sessions[n:]:
-            print("  " + resume_cmd(t, c, s, _p))
+        for (m, t, c, s, tk, _p, _a) in sessions[n:]:
+            print("  " + resume_cmd(t, c, s, _p, _a))
     if mode == "stage":
         print("\nReview each pane, then hit Enter to launch.")
     return 0

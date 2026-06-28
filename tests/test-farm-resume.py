@@ -8,6 +8,7 @@ tmux-resurrect snapshot says was running, regardless of log mtime.
 
 Run: python3 tests/test-farm-resume.py   (exit 0 = pass)
 """
+import json
 import os
 import sys
 import tempfile
@@ -73,6 +74,39 @@ def test_parse():
                   cwd == os.path.join(home, "Projects", "oktapod"))
 
 
+def test_parse_fresh_agent():
+    """Bare `claude`/`codex` panes (no resume uuid) parse as (tool, cwd, None).
+
+    These are the long-idle fresh agents that used to vanish on reboot: RESUME_RE
+    can't match them, so the parser must still surface them with sid=None for the
+    caller to resolve against the newest log for cwd.
+    """
+    with tempfile.TemporaryDirectory() as home:
+        for d in ("Projects/chat-sql-nlp", "Projects/reachout", "Projects/idle-shell"):
+            os.makedirs(os.path.join(home, d))
+        save = os.path.join(home, "s.txt")
+        lines = [
+            pane_line(home, "Projects/chat-sql-nlp",
+                      "claude --dangerously-skip-permissions --model claude-opus-4-8[1m]"),
+            pane_line(home, "Projects/reachout",
+                      "node /x/.nvm/bin/codex --yolo --model gpt-5.5"),
+            pane_line(home, "Projects/idle-shell", "-zsh"),  # plain shell, not an agent
+        ]
+        write_save(save, lines, 1000)
+        old_home = fr.HOME
+        fr.HOME = home
+        try:
+            recs = fr._parse_resume_lines(save)
+        finally:
+            fr.HOME = old_home
+        by_cwd = {os.path.basename(c): (t, s) for (t, c, s) in recs}
+        check("fresh: shell pane ignored", "idle-shell" not in by_cwd)
+        check("fresh: bare claude surfaced with sid=None",
+              by_cwd.get("chat-sql-nlp") == ("claude", None))
+        check("fresh: bare codex surfaced with sid=None",
+              by_cwd.get("reachout") == ("codex", None))
+
+
 def test_gap_recovers_idle():
     with tempfile.TemporaryDirectory() as home:
         os.makedirs(os.path.join(home, "Projects", "oktapod"))
@@ -122,7 +156,57 @@ def test_no_gap_uses_newest_only():
         check("no-gap: only newest save used", sids == {WHISPER})
 
 
+def test_account_resume_cmd():
+    """resume_cmd re-adds the `--work` flag for work-account sessions."""
+    cwd = os.path.join(fr.HOME, "Projects", "x")
+    check("acct: codex --work placed after binary",
+          fr.resume_cmd("codex", cwd, OKTAPOD, None, "work")
+          == f"cd ~/Projects/x && codex --work resume {OKTAPOD}")
+    check("acct: claude --work placed after binary",
+          fr.resume_cmd("claude", cwd, WHISPER, None, "work")
+          == f"cd ~/Projects/x && claude --work --resume {WHISPER}")
+    check("acct: default account has no --work",
+          "--work" not in fr.resume_cmd("codex", cwd, OKTAPOD, None, None))
+
+
+def test_scan_tags_work_account():
+    """A codex session whose log lives under ~/.codex-work is tagged 'work' and
+    its resume command carries --work — the account that used to go missing."""
+    with tempfile.TemporaryDirectory() as home:
+        wdir = os.path.join(home, ".codex-work/sessions/2026/06/28")
+        os.makedirs(wdir)
+        proj = os.path.join(home, "Projects/secret")
+        os.makedirs(proj)
+        log = os.path.join(wdir, f"rollout-2026-06-28T00-00-00-{OKTAPOD}.jsonl")
+        with open(log, "w") as f:
+            f.write(json.dumps({"cwd": proj}) + "\n")
+        saved = (fr.HOME, fr.CLAUDE_PROJECT_DIRS, fr.CODEX_SESSION_DIRS,
+                 fr.RESURRECT_DIRS)
+        fr.HOME = home
+        fr.CLAUDE_PROJECT_DIRS = [(os.path.join(home, ".claude/projects"), None)]
+        fr.CODEX_SESSION_DIRS = [
+            (os.path.join(home, ".codex/sessions"), None),
+            (os.path.join(home, ".codex-work/sessions"), "work"),
+        ]
+        fr.RESURRECT_DIRS = (os.path.join(home, "no-such-dir"),)
+        try:
+            sessions = fr.scan(72)
+        finally:
+            (fr.HOME, fr.CLAUDE_PROJECT_DIRS, fr.CODEX_SESSION_DIRS,
+             fr.RESURRECT_DIRS) = saved
+        rec = [r for r in sessions if r[3] == OKTAPOD]
+        check("scan: work-account session found", len(rec) == 1)
+        if rec:
+            check("scan: tagged as work account", rec[0][6] == "work")
+            check("scan: resume cmd carries --work",
+                  "codex --work resume" in
+                  fr.resume_cmd(rec[0][1], rec[0][2], rec[0][3], rec[0][5], rec[0][6]))
+
+
 test_parse()
+test_parse_fresh_agent()
+test_account_resume_cmd()
+test_scan_tags_work_account()
 test_gap_recovers_idle()
 test_no_gap_uses_newest_only()
 
