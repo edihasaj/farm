@@ -42,6 +42,27 @@ FARM_VIEW="${FARM_VIEW:-$BIN/farm-view}"
 # Re-running `farm` is therefore the one-shot fix for a drifted server.
 refresh_server_env() { tmux set-environment -g PATH "$PATH" 2>/dev/null || true; }
 
+# After a `brew upgrade tmux`, the long-lived server keeps running the OLD binary
+# until it is restarted — so shipped crash fixes (notably the 3.6 copy-mode
+# double-free that took the farm down) never take effect, and you keep crashing on
+# code that is already patched on disk. We don't act (restarting kills agents);
+# we just warn when the running server's version differs from the on-disk binary,
+# so you can cycle the server when the farm is idle. `#{version}` is the server's
+# binary; `tmux -V` is the on-disk one.
+warn_stale_tmux() {
+  local server disk
+  server="$(tmux display-message -p '#{version}' 2>/dev/null)" || return 0
+  disk="$(tmux -V 2>/dev/null | awk '{print $2}')"
+  [[ -n "$server" && -n "$disk" && "$server" != "$disk" ]] || return 0
+  {
+    echo "farm: ⚠ tmux server is $server but $disk is installed on disk."
+    echo "farm:   The live server keeps the OLD binary until restarted, so tmux fixes"
+    echo "farm:   (incl. the copy-mode crash) are NOT active yet. When the farm is idle:"
+    echo "farm:     tmux kill-server && farm   # restores layout + stages resumes"
+  } >&2
+  sleep 3
+}
+
 # True iff every pane in the session is a bare shell (no agent running). That's the
 # post-reboot signature: tmux-continuum restores the windows/panes but the agent
 # processes are gone, so nothing but login shells are running.
@@ -85,6 +106,7 @@ stage_resumes() {
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   refresh_server_env
+  warn_stale_tmux
   if (( $# > 0 )); then
     "$FARM_VIEW" "$N" "$SESSION" "$START_DIR" >/dev/null 2>&1
   fi

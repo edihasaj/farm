@@ -27,7 +27,7 @@ shipyard <repo> <task>
 
 | Path | What |
 |---|---|
-| `bin/farm` | open or attach the 32-pane tmux farm grid for parallel agents |
+| `bin/farm` | open or attach the 32-pane tmux farm grid for parallel agents. On attach it warns if the running tmux server is an older binary than the one on disk (a long-lived server keeps the binary it started with), so after a `brew upgrade tmux` you know to cycle the server — otherwise shipped fixes like the 3.6 copy-mode crash never take effect |
 | `bin/farm-view` | dashboard of repos: branch / dirty / last commit |
 | `bin/farm-tabname` | zsh snippet: name iTerm tabs by git repo |
 | `bin/farm-reflow` | reshape the grid to the client width (client-resized hook) |
