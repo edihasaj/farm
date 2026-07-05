@@ -4,7 +4,8 @@
 /tmp/
 __pycache__/
 *.pyc
-browser/chrome-profile/
+browser/
+vmlab/
 queue/
 control/
 repos/
