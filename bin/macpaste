@@ -4,6 +4,9 @@
 # tmux's OSC52). Fast after the first call via a persistent SSH control connection.
 # Override the target with FARM_CLIPBOARD_HOST if your laptop has a different name.
 host="${FARM_CLIPBOARD_HOST:-edis-macbook-pro}"
+# Force a UTF-8 locale on the remote: pbcopy picks its input encoding from LC_CTYPE/LANG,
+# and BatchMode ssh arrives with an empty locale (US-ASCII), which mangles multi-byte
+# characters like em/en dashes (— → â€"). LC_CTYPE alone is enough and avoids SendEnv issues.
 exec ssh -o BatchMode=yes -o ConnectTimeout=3 \
   -o ControlMaster=auto -o ControlPath=/tmp/cm-macpaste -o ControlPersist=300 \
-  "$host" pbcopy
+  "$host" 'LC_ALL=en_US.UTF-8 pbcopy'
