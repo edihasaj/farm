@@ -203,10 +203,42 @@ def test_scan_tags_work_account():
                   fr.resume_cmd(rec[0][1], rec[0][2], rec[0][3], rec[0][5], rec[0][6]))
 
 
+def test_scan_skips_trashed_project():
+    """A session whose cwd was moved into the Trash is deliberately closed, so scan
+    must not propose `cd ~/.Trash/<proj> && resume` after a reboot."""
+    with tempfile.TemporaryDirectory() as home:
+        cdir = os.path.join(home, ".codex/sessions/2026/07/07")
+        os.makedirs(cdir)
+        trashed = os.path.join(home, ".Trash/kiln")
+        live = os.path.join(home, "Projects/live")
+        os.makedirs(trashed)
+        os.makedirs(live)
+        for cwd, sid in ((trashed, OKTAPOD), (live, WHISPER)):
+            log = os.path.join(cdir, f"rollout-2026-07-07T00-00-00-{sid}.jsonl")
+            with open(log, "w") as f:
+                f.write(json.dumps({"cwd": cwd}) + "\n")
+        saved = (fr.HOME, fr.CLAUDE_PROJECT_DIRS, fr.CODEX_SESSION_DIRS,
+                 fr.RESURRECT_DIRS, fr.TRASH)
+        fr.HOME = home
+        fr.TRASH = os.path.join(home, ".Trash")
+        fr.CLAUDE_PROJECT_DIRS = [(os.path.join(home, ".claude/projects"), None)]
+        fr.CODEX_SESSION_DIRS = [(os.path.join(home, ".codex/sessions"), None)]
+        fr.RESURRECT_DIRS = (os.path.join(home, "no-such-dir"),)
+        try:
+            sessions = fr.scan(72)
+        finally:
+            (fr.HOME, fr.CLAUDE_PROJECT_DIRS, fr.CODEX_SESSION_DIRS,
+             fr.RESURRECT_DIRS, fr.TRASH) = saved
+        sids = {r[3] for r in sessions}
+        check("trash: trashed-project session dropped", OKTAPOD not in sids)
+        check("trash: live-project session kept", WHISPER in sids)
+
+
 test_parse()
 test_parse_fresh_agent()
 test_account_resume_cmd()
 test_scan_tags_work_account()
+test_scan_skips_trashed_project()
 test_gap_recovers_idle()
 test_no_gap_uses_newest_only()
 

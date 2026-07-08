@@ -45,6 +45,16 @@ SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
 CLAUDE_PROJECT_DIRS = [(CLAUDE_DIR, None), (f"{HOME}/.claude-work/projects", "work")]
 CODEX_SESSION_DIRS = [(CODEX_DIR, None), (f"{HOME}/.codex-work/sessions", "work")]
 
+# A session whose cwd got moved into the Trash was deliberately closed — resuming it
+# means `cd ~/.Trash/<proj> && resume`, which after a reboot silently drags dead
+# projects back. Drop anything living under the macOS trash (per-volume trashes too).
+TRASH = f"{HOME}/.Trash"
+
+
+def _is_trashed(cwd):
+    return bool(cwd) and (cwd == TRASH or cwd.startswith(TRASH + "/")
+                          or "/.Trashes/" in cwd)
+
 # `claude --resume <uuid>` / `codex resume <uuid>` as it appears in a resurrect
 # pane line (codex is wrapped as `node .../codex resume <uuid>`; search anywhere).
 RESUME_RE = re.compile(
@@ -272,6 +282,8 @@ def scan(since_hours):
     found.sort(reverse=True)
     seen, out = set(), []
     for rec in found:
+        if _is_trashed(rec[2]):  # trashed project = deliberately closed; don't revive
+            continue
         key = (rec[1], rec[2], rec[6])
         if key in seen:
             continue
