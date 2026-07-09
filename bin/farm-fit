@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# farm-fit [W] [H] [SESSION] — fit every window in SESSION to the client size ONCE.
+#
+# Called from tmux's `client-attached` hook (see config/tmux.conf). This is the ONLY
+# thing that resizes the farm: the config sets `window-size manual`, so tmux no longer
+# auto-resizes on every client size change. That matters because the default
+# (`window-size latest`) re-runs resize_window on the *transient* size wobble macOS emits
+# on screen-lock — and if a pane is in copy-mode at that instant, layout_fix_panes /
+# window_copy_resize can spin forever (100% CPU, wedged server; confirmed via `sample`).
+#
+# We only ever need the fit once, when a client attaches. So on attach we:
+#   1. drop every pane out of copy-mode (so the one deliberate resize can't spin either),
+#   2. resize every window to the attaching client's W x H.
+# Lock/display wobbles afterward are `client-resized`, which we do NOT hook, and with
+# manual sizing tmux ignores them — so the copy-mode resize loop can't start.
+#
+# W/H come from the hook as #{client_width}/#{client_height} (run-shell expands formats);
+# if they arrive unexpanded/non-numeric we query the current client directly.
+set -uo pipefail
+
+w=${1:-}
+h=${2:-}
+sess=${3:-}
+
+[[ -z "$sess" ]] && sess=$(tmux display-message -p '#{session_name}' 2>/dev/null)
+case $w in ''|*[!0-9]*) w=$(tmux display-message -p '#{client_width}'  2>/dev/null);; esac
+case $h in ''|*[!0-9]*) h=$(tmux display-message -p '#{client_height}' 2>/dev/null);; esac
+
+[[ -n "$sess" && "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || exit 0
+
+# 1. cancel copy-mode in any pane that's in it (guarded: -X to a non-mode pane errors)
+tmux list-panes -s -t "$sess" -F '#{pane_in_mode} #{pane_id}' 2>/dev/null \
+  | awk '$1==1 {print $2}' \
+  | while read -r p; do tmux send-keys -t "$p" -X cancel 2>/dev/null || true; done
+
+# 2. fit every window to the client (explicit resize-window sticks under manual sizing)
+tmux list-windows -t "$sess" -F '#{window_id}' 2>/dev/null \
+  | while read -r win; do tmux resize-window -t "$win" -x "$w" -y "$h" 2>/dev/null || true; done
