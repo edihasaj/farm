@@ -23,6 +23,8 @@ Usage:
     farm-resume <list|stage|go> --since 24   window in hours (default 24)
                                 --session NAME   tmux session (default: farm)
                                 --json           machine-readable output (list mode)
+    farm-resume dismiss-scan    (resurrect post-save-all hook) tombstone panes that
+                                were closed since the last save, so they stay closed
 
 Safety: stage/go only target *free* panes (a shell, not a running agent), and never
 touch a pane that already has claude/codex running.
@@ -54,6 +56,75 @@ TRASH = f"{HOME}/.Trash"
 def _is_trashed(cwd):
     return bool(cwd) and (cwd == TRASH or cwd.startswith(TRASH + "/")
                           or "/.Trashes/" in cwd)
+
+
+# --- closed-pane tombstones -------------------------------------------------
+# A pane the user CLOSES vanishes from the next resurrect save. But after a crash,
+# "absent from the newest save" is ambiguous: it could equally be a session that was
+# ALIVE and got killed by the crash, which we DO want back. The snapshot alone can't
+# tell intent apart. So we record closures explicitly: the resurrect post-save-all
+# hook runs `farm-resume dismiss-scan` each checkpoint, which diffs the new save
+# against the previous and tombstones whatever disappeared. On resume we skip anything
+# tombstoned (a deliberate close) so a terminal you closed stays closed across reboots.
+DISMISS_LOG = f"{HOME}/.farm-snapshots/dismissed.tsv"
+
+
+def _dismiss_key(tool, cwd, sid):
+    # resume-launched panes carry a uuid (stable across reboots); fresh agents have
+    # none, so key them by (tool, cwd) — the same fallback scan()/_resurrect_live use.
+    return sid if sid else f"{tool}\t{cwd}"
+
+
+def _load_dismissed():
+    """key -> epoch it was last tombstoned. Missing file = nothing dismissed."""
+    out = {}
+    try:
+        with open(DISMISS_LOG, "r", errors="ignore") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    out[parts[1]] = float(parts[0])
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def _save_dismissed(d):
+    os.makedirs(os.path.dirname(DISMISS_LOG), exist_ok=True)
+    tmp = DISMISS_LOG + ".tmp"
+    with open(tmp, "w") as f:
+        for key, ts in sorted(d.items(), key=lambda kv: kv[1]):
+            f.write(f"{ts:.0f}\t{key}\n")
+    os.replace(tmp, DISMISS_LOG)
+
+
+def dismiss_scan():
+    """resurrect post-save-all hook: tombstone agents that vanished since last save.
+
+    Runs once per checkpoint (~1/min). Compares the two newest saves: anything present
+    in the previous save but gone from the newest was closed -> tombstone it. Anything
+    present in the newest save is (re)opened -> clear its tombstone. Net: the ledger
+    holds exactly the sessions that are currently closed-on-purpose. Because it runs
+    every save, each disappearance is caught the moment it happens.
+    """
+    saves = _resurrect_saves()
+    if not saves:
+        return
+    cur = {_dismiss_key(t, c, s) for (t, c, s) in _parse_resume_lines(saves[0][1])}
+    prev = set()
+    if len(saves) >= 2:
+        prev = {_dismiss_key(t, c, s) for (t, c, s) in _parse_resume_lines(saves[1][1])}
+    d = _load_dismissed()
+    now = time.time()
+    for k in prev - cur:      # disappeared this checkpoint = closed
+        d[k] = now
+    for k in cur:             # back on screen = un-dismiss (covers manual resume)
+        d.pop(k, None)
+    _save_dismissed(d)
 
 # `claude --resume <uuid>` / `codex resume <uuid>` as it appears in a resurrect
 # pane line (codex is wrapped as `node .../codex resume <uuid>`; search anywhere).
@@ -280,9 +351,18 @@ def scan(since_hours):
     # newest first, dedupe to newest per (tool, cwd, account) — a project open under
     # BOTH the default and the work account brings back both panes.
     found.sort(reverse=True)
+    dismissed = _load_dismissed()
     seen, out = set(), []
     for rec in found:
         if _is_trashed(rec[2]):  # trashed project = deliberately closed; don't revive
+            continue
+        # Tombstoned (deliberately closed) session: skip it, UNLESS its log was touched
+        # after the close (rec[0] is the log mtime) — that means it was used again since,
+        # so it's legitimately back. Check both the uuid key and the fresh (tool,cwd) key.
+        dt = dismissed.get(rec[3])
+        if dt is None:
+            dt = dismissed.get(f"{rec[1]}\t{rec[2]}")
+        if dt is not None and rec[0] <= dt + 1:
             continue
         key = (rec[1], rec[2], rec[6])
         if key in seen:
@@ -387,6 +467,12 @@ def free_panes(session):
 
 def main():
     argv = sys.argv[1:]
+    if argv and argv[0] == "dismiss-scan":
+        try:
+            dismiss_scan()
+        except Exception:  # never let a save hook fail the resurrect save
+            return 0
+        return 0
     mode = "list"
     if argv and argv[0] in ("list", "stage", "go"):
         mode = argv.pop(0)
