@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# farm-fit [W] [H] [SESSION] — fit every window in SESSION to the client size ONCE.
+# farm-fit [W] [H] [SESSION] — fit every window in SESSION to the client size.
 #
-# Called from tmux's `client-attached` hook (see config/tmux.conf). This is the ONLY
-# thing that resizes the farm: the config sets `window-size manual`, so tmux no longer
-# auto-resizes on every client size change. That matters because the default
-# (`window-size latest`) re-runs resize_window on the *transient* size wobble macOS emits
-# on screen-lock — and if a pane is in copy-mode at that instant, layout_fix_panes /
+# Called from tmux's `client-attached` AND `client-resized` hooks (see config/tmux.conf).
+# This is the ONLY thing that resizes the farm: the config sets `window-size manual`, so
+# tmux never auto-resizes on its own. That matters because the default (`window-size
+# latest`) re-runs resize_window internally on the *transient* wobble macOS emits on
+# screen-lock — and if a pane is in copy-mode at that instant, layout_fix_panes /
 # window_copy_resize can spin forever (100% CPU, wedged server; confirmed via `sample`).
 #
-# We only ever need the fit once, when a client attaches. So on attach we:
-#   1. drop every pane out of copy-mode (so the one deliberate resize can't spin either),
-#   2. resize every window to the attaching client's W x H.
-# Lock/display wobbles afterward are `client-resized`, which we do NOT hook, and with
-# manual sizing tmux ignores them — so the copy-mode resize loop can't start.
+# We do the fit ourselves, spin-safely, so it's safe to run on every client size change
+# (attach, and font-size changes like Cmd -/Cmd + which grow/shrink the client's cells):
+#   0. bail if every window already matches W x H (no-op wobble, e.g. lock-and-back),
+#   1. drop every pane out of copy-mode (so our own resize can't hit the spin path),
+#   2. resize the stale windows to the client's W x H.
+# Because tmux's internal auto-resize stays off (manual) and we cancel copy-mode BEFORE
+# resizing, the copy-mode resize loop can never start.
 #
 # W/H come from the hook as #{client_width}/#{client_height} (run-shell expands formats);
 # if they arrive unexpanded/non-numeric we query the current client directly.
@@ -28,11 +30,22 @@ case $h in ''|*[!0-9]*) h=$(tmux display-message -p '#{client_height}' 2>/dev/nu
 
 [[ -n "$sess" && "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || exit 0
 
-# 1. cancel copy-mode in any pane that's in it (guarded: -X to a non-mode pane errors)
+# Which windows are NOT already at W x H? (skip the whole thing on a no-op wobble, e.g.
+# a screen-lock resize that returns to the same size — so we don't kick panes out of
+# copy-mode/scrollback for nothing. This runs on every client-resized, not just attach.)
+stale=$(tmux list-windows -t "$sess" -F '#{window_id} #{window_width} #{window_height}' 2>/dev/null \
+  | awk -v w="$w" -v h="$h" '$2!=w || $3!=h {print $1}')
+[[ -z "$stale" ]] && exit 0
+
+# 1. cancel copy-mode in any pane that's in it (guarded: -X to a non-mode pane errors).
+# This is the spin guard: with a pane in copy-mode, resize-window -> layout_fix_panes ->
+# window_copy_resize can spin at 100% CPU. Dropping copy-mode first makes the resize safe,
+# which is why we can afford to run this on every client-resized, not only at attach.
 tmux list-panes -s -t "$sess" -F '#{pane_in_mode} #{pane_id}' 2>/dev/null \
   | awk '$1==1 {print $2}' \
   | while read -r p; do tmux send-keys -t "$p" -X cancel 2>/dev/null || true; done
 
-# 2. fit every window to the client (explicit resize-window sticks under manual sizing)
-tmux list-windows -t "$sess" -F '#{window_id}' 2>/dev/null \
-  | while read -r win; do tmux resize-window -t "$win" -x "$w" -y "$h" 2>/dev/null || true; done
+# 2. fit the stale windows to the client (explicit resize-window sticks under manual sizing)
+while read -r win; do
+  [[ -n "$win" ]] && tmux resize-window -t "$win" -x "$w" -y "$h" 2>/dev/null || true
+done <<< "$stale"
