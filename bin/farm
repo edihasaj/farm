@@ -14,7 +14,7 @@
 # each tab's panes into an even grid, never killing agents).
 set -uo pipefail
 
-SESSION=farm
+SESSION="${FARM_SESSION:-farm}"
 
 # Optional leading resume/-r/--resume: force resume staging (works on an existing
 # session, not just a fresh one). Without it, staging still auto-fires after a
@@ -107,15 +107,25 @@ stage_resumes() {
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   refresh_server_env
   warn_stale_tmux
-  if (( $# > 0 )); then
+  # Post-reboot recovery on an *existing* session: continuum restores the farm at
+  # boot, so it's never "fresh" exactly when agents were lost. Detect the signature
+  # (every pane a bare shell) and we haven't already handled this session; `farm
+  # resume` forces it regardless.
+  already="$(tmux show-option -t "$SESSION" -qv @farm_resumed 2>/dev/null)"
+  reboot_recovery=0
+  if (( FORCE_RESUME )) || { [[ "$already" != "1" ]] && all_panes_idle; }; then
+    reboot_recovery=1
+  fi
+  # Rebuild the grid when the user asked (args) OR on a post-reboot recovery:
+  # continuum can restore a wrong-sized layout (e.g. 6 panes instead of the full
+  # 4x8=32), and staging resumes into that leaves the grid broken. farm-view's
+  # idle path collapses the restored session and rebuilds the exact 32-pane tab
+  # set, so resumes then stage into a correct grid. Skipped once @farm_resumed is
+  # set, so a second bare `farm` (before you hit Enter) won't re-kill the panes.
+  if (( $# > 0 )) || (( reboot_recovery )); then
     "$FARM_VIEW" "$N" "$SESSION" "$START_DIR" >/dev/null 2>&1
   fi
-  # Post-reboot recovery on an *existing* session: continuum restores the farm at
-  # boot, so it's never "fresh" exactly when agents were lost. Auto-stage when every
-  # pane is a bare shell and we haven't already staged this session. `farm resume`
-  # forces it regardless.
-  already="$(tmux show-option -t "$SESSION" -qv @farm_resumed 2>/dev/null)"
-  if (( FORCE_RESUME )) || { [[ "$already" != "1" ]] && all_panes_idle; }; then
+  if (( reboot_recovery )); then
     stage_resumes
   fi
   exec tmux attach -t "$SESSION"
