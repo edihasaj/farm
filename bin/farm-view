@@ -35,6 +35,24 @@ grid_window() {
   fi
 }
 
+# trim_idle_tail: drop trailing windows that are ENTIRELY bare shells, down to the
+# target tab count (ceil(TOTAL/per)). After a repack, idle panes cluster into the
+# last tab(s); left alone they pile up past 32 (e.g. a restore/reflow that leaves a
+# 5th all-idle tab). We only kill from the END and only windows with zero agent
+# panes, so no running claude/codex is ever touched. Front tabs with agents stay put
+# even if that keeps us above the target.
+trim_idle_tail() {
+  local target wid busy
+  target=$(( (TOTAL + per - 1) / per ))          # ceil(32/per)
+  while (( $(tmux list-windows -t "$sess" | wc -l) > target )); do
+    wid=$(tmux list-windows -t "$sess" -F '#{window_id}' | tail -1)
+    busy=$(tmux list-panes -t "$wid" -F '#{pane_current_command}' \
+      | grep -vcE '^(zsh|-zsh|bash|-bash|sh|login|fish)$')
+    (( busy == 0 )) || break                      # last tab has an agent -> stop
+    tmux kill-window -t "$wid" 2>/dev/null || break
+  done
+}
+
 # repack: consolidate ALL panes of $sess into ceil(N/per) tabs of `per`, preserving every
 # pane's PROCESS (break/move/swap — zero kills) and the L1..Ln order, then grid each tab.
 # This is the cross-tab "rearrange like before" for BUSY sessions (agents keep running).
@@ -99,9 +117,12 @@ if is_idle "$sess"; then
     (( remaining -= n ))
   done
 else
-  # busy: agents are running -> NEVER kill. Consolidate every pane into ceil(total/per)
-  # tabs of `per` (cross-tab repack), keeping each process and the L1..Ln order intact.
+  # busy: agents are running -> NEVER kill an agent. Consolidate every pane into
+  # ceil(total/per) tabs of `per` (cross-tab repack), keeping each process and the
+  # L1..Ln order intact, then drop any trailing all-idle tabs so extras don't pile
+  # up past the 32-pane target.
   repack
+  trim_idle_tail
 fi
 
 # name tabs F1..Fn + label panes by project
