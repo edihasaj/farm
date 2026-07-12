@@ -30,6 +30,21 @@ case $h in ''|*[!0-9]*) h=$(tmux display-message -p '#{client_height}' 2>/dev/nu
 
 [[ -n "$sess" && "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || exit 0
 
+# client_height is the WHOLE client, status bar included. The drawable window area is
+# client_height MINUS the status line(s), so fitting a window to the raw client_height
+# makes it 1 (or more) rows TALLER than the visible viewport: the bottom row lands just
+# below the screen edge, and typing to the bottom of a bottom-row pane scrolls the whole
+# window up to keep the cursor visible ("the grid shifts up a bit"). Under the old
+# `window-size latest` tmux subtracted this itself; doing the fit manually we must too.
+# status: off->0, on->1, or an integer 2-5. Subtract that many lines from the target H.
+sl=$(tmux show -gv status 2>/dev/null)
+case $sl in
+  off)            sl=0 ;;
+  on|''|*[!0-9]*) sl=1 ;;
+esac
+h=$(( h - sl ))
+(( h < 1 )) && h=1
+
 # Which windows are NOT already at W x H? (skip the whole thing on a no-op wobble, e.g.
 # a screen-lock resize that returns to the same size — so we don't kick panes out of
 # copy-mode/scrollback for nothing. This runs on every client-resized, not just attach.)
