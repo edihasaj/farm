@@ -28,7 +28,9 @@ shipyard <repo> <task>
 | Path | What |
 |---|---|
 | `bin/farm` | open or attach the 32-pane tmux farm grid for parallel agents. On attach it warns if the running tmux server is an older binary than the one on disk (a long-lived server keeps the binary it started with), so after a `brew upgrade tmux` you know to cycle the server — otherwise shipped fixes like the 3.6 copy-mode crash never take effect |
-| `bin/cmx` | short current-terminal Mosh + tmux companion: `cmx projectx` attaches the primary Studio session, `--new` adds an independent session for the same project, and `--workspace` opts into a native cmux remote workspace |
+| `bin/cmx` | short SSH + tmux companion: `cmx projectx` attaches the primary Studio session, `--new` adds an independent session, and `-w` creates a grouped local cmux view |
+| `bin/cmx-agent-event` / `bin/cmx-watch` | bridge Codex/Claude lifecycle hooks on Studio to local cmux running indicators and completion notifications |
+| `bin/cmx-restore` | reattach all registered local cmux workspaces after cmux or the laptop restarts |
 | `bin/farm-view` | dashboard of repos: branch / dirty / last commit |
 | `bin/farm-tabname` | zsh snippet: name iTerm tabs by git repo |
 | `bin/farm-reflow` | reshape the grid to the client width (client-resized hook) |
@@ -79,34 +81,42 @@ terminal by default:
 cmx projectx                   # current terminal; attach/create projectx
 cmx projectx --new             # independent projectx-2 session, same directory
 cmx projectx --slot review     # explicit projectx-review session
-cmx projectx -w                # native new cmux remote workspace
+cmx projectx -w                # grouped local cmux view -> SSH -> Studio tmux
 cmx api --host gpu-box         # current terminal, another SSH-config host
 cmx sessions                   # persistent Studio tmux sessions
 cmx list                       # native cmux workspaces
-cmx restore                    # manual previous-app-snapshot fallback
-cmx hooks codex                # install native Codex resume hooks
+cmx restore                    # reattach all registered views after restart
+cmx setup                      # install Codex + Claude state hooks on Studio
 ```
 
 Running `cmx projectx` from multiple terminals attaches those terminals to the
 same tmux session (a mirrored view). Use `--new` or `--slot` when the terminals
 should be independent but share `~/Projects/projectx`. `-w` (short for
-`--workspace`) retains the old first-class cmux behavior and participates in
-automatic app-session restore.
+`--workspace`) creates a normal local cmux workspace. Its foreground SSH client
+attaches the named Studio tmux session, so image/file drop keeps cmux's ordinary
+SSH behavior without the native remote daemon.
 
 In current-terminal mode, `exit` closes the remote shell/session and returns to
 the local terminal. Use `Ctrl-b d` to detach while leaving the session running.
-Native `-w` workspaces keep their shell available for restore; close them with
-`Cmd+Shift+W`.
+Close a `-w` workspace with `Cmd+Shift+W`; the Studio tmux session remains.
 
-cmux restores windows, workspaces, panes, and its `mosh-tmux` profile on normal
-app launch. A hard remote-machine reboot cannot preserve process memory: tmux
-sessions are recreated, while supported agents resume only when cmux captured
-their session IDs through `cmux hooks setup`.
+Studio tmux is the source of truth. cmux is a replaceable local view. `cmx -w`
+registers the view in `~/.config/farm/cmx-workspaces.tsv` and attaches cmux
+surface-resume metadata. After a cmux or laptop restart, run `cmx restore`; it
+respawns the registered terminal surfaces and reattaches the still-running tmux
+sessions without restarting their agents. A Studio reboot is different: process
+memory is gone, so use `farm-resume` / the agent's own resume command.
 
-Inside a `cmx` session, `exit` respawns the persistent shell instead of
-terminating tmux/Mosh. Use tmux detach (`Ctrl-b d`) to return to the local shell.
-Close a current-terminal surface with `Cmd+W`, or a native `--workspace` with
-`Cmd+Shift+W`; the named tmux session remains ready for the next attachment.
+Run `cmx setup` once on Studio. Codex and Claude prompt/stop hooks write tiny
+per-session state files under `~/.local/state/farm/agents/`. Each local cmux view
+polls its session state over SSH, shows the workspace loading indicator while
+the agent works, and posts a cmux notification when it stops. No code or prompt
+content is copied into those files—only state, agent name, and an event id.
+
+Plain `cmx projectx` uses SSH by default. This enables cmux's foreground-SSH
+file handling. `--mosh` remains available for unreliable networks, but cmux file
+drop/upload is not available through Mosh. Use tmux detach (`Ctrl-b d`) to leave
+the remote process running.
 
 ## Usage
 

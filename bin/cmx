@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Short Mosh+tmux companion to the traditional Ghostty/tmux `farm` command.
+# Stable local-cmux view over SSH + Studio tmux.
 set -euo pipefail
 
-CMX_VERSION=2
+CMX_VERSION=3
 
 usage() {
   cat <<'EOF'
@@ -10,11 +10,11 @@ Usage:
   cmx <project> [options]       attach in the current terminal
   cmx <project> --new           next independent session, same project
   cmx <project> --slot <name>   explicit independent session
-  cmx <project> -w              create a native cmux remote workspace
-  cmx restore                   manually restore the previous cmux app snapshot
+  cmx <project> -w              create a local cmux workspace for the session
+  cmx restore                   reattach registered workspaces after a restart
   cmx list                      list current cmux workspaces
   cmx sessions                  list persistent Studio tmux sessions
-  cmx hooks [agent]             install cmux agent-resume hooks
+  cmx setup                     install running/done agent hooks
 
 Project options:
   -H, --host <ssh-alias>        remote host (default: studio)
@@ -22,23 +22,24 @@ Project options:
   -s, --slot <name>             session suffix: project-<name>
       --new                     choose the next free session automatically
   -c, --command <command>       run only when creating a fresh tmux session
-  -w, --workspace               use a new native cmux workspace instead
-  -n, --name <title>            native workspace title
-      --no-focus                create native workspace without focusing it
+  -w, --workspace               open in a grouped local cmux workspace
+  -n, --name <title>            workspace title
+      --no-focus                create workspace without focusing it
+      --mosh                    use Mosh instead of SSH (no image upload)
 
 Examples:
   cmx manager                    # current terminal, session manager
   cmx oktapod --new              # oktapod-2, then oktapod-3, ...
   cmx oktapod --slot review      # explicit session oktapod-review
-  cmx manager -w                 # native-workspace behavior
+  cmx manager -w                 # local cmux view, persistent Studio tmux
   cmx api -H gpu-box -d ~/work/api
   cmx restore
 
 Running the same project without --new/--slot attaches the same tmux session,
 so multiple terminals mirror it. Use --new for independent terminals that share
-one project directory. Native --workspace mode participates in cmux app restore.
-In current-terminal mode, `exit` closes the session; Ctrl-b d keeps it running.
-Close a native workspace with Cmd+Shift+W.
+one project directory. `-w` creates a grouped local workspace and a restore
+binding. In current-terminal mode, `exit` closes the session; Ctrl-b d keeps it
+running. Close a workspace with Cmd+Shift+W.
 EOF
 }
 
@@ -79,6 +80,17 @@ find_ssh() {
   fi
 }
 
+script_path() {
+  local source=${BASH_SOURCE[0]}
+  while [[ -L $source ]]; do
+    local dir
+    dir=$(cd -P "$(dirname "$source")" && pwd)
+    source=$(readlink "$source")
+    [[ $source == /* ]] || source="$dir/$source"
+  done
+  printf '%s\n' "$(cd -P "$(dirname "$source")" && pwd)/$(basename "$source")"
+}
+
 remote_cd_command() {
   local path=$1 quoted
   case $path in
@@ -105,8 +117,7 @@ case ${1:-} in
   restore|resume)
     shift
     (( $# == 0 )) || die 'restore takes no arguments'
-    CMUX="$(find_cmux)"
-    exec "$CMUX" restore-session
+    exec "$(dirname "$(script_path)")/cmx-restore"
     ;;
   list|ls)
     shift
@@ -120,14 +131,10 @@ case ${1:-} in
     exec "$SSH_BIN" -o RequestTTY=no -o RemoteCommand=none "${1:-${CMX_HOST:-studio}}" \
       "tmux list-sessions -F '#{session_name}: #{session_windows} windows'"
     ;;
-  hooks)
+  setup|hooks)
     shift
-    CMUX="$(find_cmux)"
-    if (( $# == 0 )); then
-      exec "$CMUX" hooks setup
-    fi
-    (( $# == 1 )) || die 'usage: cmx hooks [agent]'
-    exec "$CMUX" hooks setup "$1"
+    (( $# == 0 )) || die 'setup takes no arguments'
+    exec "$(dirname "$(script_path)")/cmx-setup"
     ;;
 esac
 
@@ -139,6 +146,8 @@ launch_command=''
 slot=''
 auto_new=0
 native_workspace=0
+use_mosh=0
+attach_only=0
 passthrough=()
 
 while (( $# > 0 )); do
@@ -164,6 +173,14 @@ while (( $# > 0 )); do
       ;;
     -w|--workspace)
       native_workspace=1
+      shift
+      ;;
+    --mosh)
+      use_mosh=1
+      shift
+      ;;
+    --attach)
+      attach_only=1
       shift
       ;;
     -n|--name)
@@ -230,11 +247,8 @@ fi
 
 directory=${directory:-"~/Projects/$project"}
 
-if (( native_workspace == 0 )); then
-  (( ${#passthrough[@]} == 0 )) || die 'SSH/cmux flags require --workspace'
-  [[ -z $title ]] || die '--name requires --workspace'
-
-  MOSH_BIN="$(find_mosh)"
+attach_session() {
+  local transport remote_script watcher_pid=''
   printf -v quoted_session '%q' "$session"
   printf -v quoted_directory '%q' "$directory"
   printf -v quoted_command '%q' "$launch_command"
@@ -249,31 +263,71 @@ if (( native_workspace == 0 )); then
   remote_script+='if [ "$created" = 1 ] && [ -n "$launch_command" ]; then tmux send-keys -t "$window_target" "$launch_command" Enter; fi; '
   remote_script+='exec tmux attach-session -t "$target"'
 
-  exec "$MOSH_BIN" --predict="${CMX_PREDICT:-adaptive}" \
-    --ssh="$(find_ssh) -o RequestTTY=no -o RemoteCommand=none" \
-    "$host" -- /bin/bash -lc "$remote_script"
+  if [[ -n ${CMUX_WORKSPACE_ID:-} ]]; then
+    local cmux self resume
+    cmux=$(find_cmux)
+    self=$(script_path)
+    printf -v resume '%q %q --attach -H %q -d %q' "$self" "$project" "$host" "$directory"
+    [[ -z $slot ]] || printf -v resume '%s --slot %q' "$resume" "$slot"
+    (( use_mosh == 0 )) || resume+=' --mosh'
+    "$cmux" surface resume set --workspace "$CMUX_WORKSPACE_ID" \
+      --kind tmux --checkpoint "$session" --name "$session" --shell "$resume" >/dev/null 2>&1 || true
+    "$(dirname "$self")/cmx-watch" "$session" "$CMUX_WORKSPACE_ID" "$host" &
+    watcher_pid=$!
+    trap '[[ -z ${watcher_pid:-} ]] || kill "$watcher_pid" 2>/dev/null || true' EXIT HUP INT TERM
+  fi
+
+  if (( use_mosh )); then
+    transport=$(find_mosh)
+    "$transport" --predict="${CMX_PREDICT:-adaptive}" \
+      --ssh="$(find_ssh) -o RequestTTY=no -o RemoteCommand=none" \
+      "$host" -- /bin/bash -lc "$remote_script"
+  else
+    transport=$(find_ssh)
+    printf -v quoted_remote '%q' "$remote_script"
+    "$transport" -tt -o ServerAliveInterval=20 -o ServerAliveCountMax=2 \
+      -o RemoteCommand=none "$host" "/bin/bash -lc $quoted_remote"
+  fi
+}
+
+if (( native_workspace == 0 || attach_only == 1 )); then
+  (( ${#passthrough[@]} == 0 )) || die 'cmux flags require --workspace'
+  [[ -z $title ]] || die '--name requires --workspace'
+  attach_session
+  exit $?
 fi
 
+(( use_mosh == 0 )) || die '--mosh is for current-terminal attachment'
 title=${title:-$session}
 CMUX="$(find_cmux)"
-# Keep the named workspace alive when its interactive shell exits. Otherwise
-# tmux, Mosh, and cmux all terminate in sequence and cmux enters its reconnect
-# surface even though the disconnect was intentional. The deferred pane-died
-# hook respawns only the shell pane; close the cmux workspace with Cmd+Shift+W.
-bootstrap="tmux set-environment ZDOTDIR \"\${CMUX_REAL_ZDOTDIR:-\$HOME}\"; tmux set-option -w remain-on-exit on; tmux set-hook -w pane-died 'run-shell -b \"tmux respawn-pane -k -t #{hook_pane}\"'; $(remote_cd_command "$directory")"
-if [[ -z $launch_command && $directory == "~/Projects/$project" ]]; then
-  bootstrap+=' 2>/dev/null || cd -- "$HOME/Projects"'
-elif [[ -n $launch_command ]]; then
-  bootstrap+=" && $launch_command"
+self=$(script_path)
+printf -v workspace_command '%q %q --attach -H %q -d %q' "$self" "$project" "$host" "$directory"
+[[ -z $slot ]] || printf -v workspace_command '%s --slot %q' "$workspace_command" "$slot"
+
+focus=true
+if (( ${#passthrough[@]} > 0 )); then
+  for arg in "${passthrough[@]}"; do
+    [[ $arg != --no-focus ]] || focus=false
+  done
+fi
+output=$("$CMUX" workspace create --name "$title" --cwd "$HOME/Projects" \
+  --command "$workspace_command" --focus "$focus")
+printf '%s\n' "$output"
+workspace_ref=$(sed -nE 's/.*workspace=(workspace:[0-9]+).*/\1/p' <<<"$output" | head -1)
+if [[ -n $workspace_ref ]] && command -v jq >/dev/null 2>&1; then
+  group_ref=$("$CMUX" workspace-group list --json 2>/dev/null | jq -r --arg name "$project" '.groups[]? | select(.name == $name) | .ref' | head -1)
+  if [[ -n $group_ref ]]; then
+    "$CMUX" workspace-group add --group "$group_ref" --workspace "$workspace_ref" >/dev/null
+  else
+    "$CMUX" workspace-group create --name "$project" --from "$workspace_ref" >/dev/null
+  fi
 fi
 
-base_args=(
-  mosh-tmux "$host"
-  --session "$session"
-  --name "$title"
-  --command "$bootstrap"
-)
-if (( ${#passthrough[@]} > 0 )); then
-  exec "$CMUX" "${base_args[@]}" "${passthrough[@]}"
+registry="${XDG_CONFIG_HOME:-$HOME/.config}/farm/cmx-workspaces.tsv"
+mkdir -p "$(dirname "$registry")"
+registry_tmp=$(mktemp "${TMPDIR:-/tmp}/cmx-registry.XXXXXX")
+if [[ -f $registry ]]; then
+  awk -F '\t' -v session="$session" '$1 != session' "$registry" >"$registry_tmp"
 fi
-exec "$CMUX" "${base_args[@]}"
+printf '%s\t%s\t%s\n' "$session" "$title" "$workspace_command" >>"$registry_tmp"
+mv -f "$registry_tmp" "$registry"

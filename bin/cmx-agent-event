@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -u
+
+state=${1:-}
+agent=${2:-agent}
+case $state in working|done|idle) ;; *) printf '{}\n'; exit 0 ;; esac
+
+cat >/dev/null || true
+if [[ -n ${TMUX_PANE:-} ]] && command -v tmux >/dev/null 2>&1; then
+  session=$(tmux display-message -p -t "$TMUX_PANE" '#S' 2>/dev/null || true)
+  if [[ -n $session ]]; then
+    state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/farm/agents"
+    mkdir -p "$state_dir"
+    tmp="$state_dir/.${session}.$$"
+    umask 077
+    printf 'state=%s\nagent=%s\nevent=%s-%s\n' "$state" "$agent" "$(date +%s)" "$$" >"$tmp"
+    mv -f "$tmp" "$state_dir/$session"
+  fi
+fi
+printf '{}\n'

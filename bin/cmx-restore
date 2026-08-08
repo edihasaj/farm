@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cmux=${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}
+registry="${XDG_CONFIG_HOME:-$HOME/.config}/farm/cmx-workspaces.tsv"
+[[ -f $registry ]] || { printf 'cmx restore: no registered workspaces yet\n' >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { printf 'cmx restore: jq is required\n' >&2; exit 1; }
+
+workspaces=$($cmux workspace list --json)
+restored=0
+missing=0
+while IFS=$'\t' read -r session title command; do
+  [[ -n $session && -n $command ]] || continue
+  ref=$(jq -r --arg title "$title" '.workspaces[]? | select(.title == $title and .remote.enabled == false) | .ref' <<<"$workspaces" | tail -1)
+  if [[ -z $ref ]]; then
+    printf 'cmx restore: missing workspace %s; run `cmx %s -w`\n' "$title" "$session" >&2
+    missing=$((missing + 1))
+    continue
+  fi
+  "$cmux" respawn-pane --workspace "$ref" --command "$command" >/dev/null
+  printf 'restored %s (%s)\n' "$title" "$ref"
+  restored=$((restored + 1))
+done <"$registry"
+
+printf 'cmx restore: %s restored, %s missing\n' "$restored" "$missing"
+(( missing == 0 ))
