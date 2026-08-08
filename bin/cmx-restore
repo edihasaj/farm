@@ -3,10 +3,26 @@ set -euo pipefail
 
 cmux=${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}
 registry="${XDG_CONFIG_HOME:-$HOME/.config}/farm/cmx-workspaces.tsv"
-[[ -f $registry ]] || { printf 'cmx restore: no registered workspaces yet\n' >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { printf 'cmx restore: jq is required\n' >&2; exit 1; }
 
 workspaces=$($cmux workspace list --json)
+if [[ ! -s $registry ]]; then
+  host=${CMX_HOST:-studio}
+  ssh_bin=${CMX_SSH_BIN:-ssh}
+  sessions=$($ssh_bin -o BatchMode=yes -o ConnectTimeout=8 -o RequestTTY=no \
+    -o RemoteCommand=none "$host" "tmux list-sessions -F '#{session_name}'" 2>/dev/null || true)
+  mkdir -p "$(dirname "$registry")"
+  self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cmx
+  while IFS=$'\t' read -r title; do
+    [[ -n $title ]] || continue
+    grep -Fxq "$title" <<<"$sessions" || continue
+    printf -v command '%q %q --attach -H %q -d %q' "$self" "$title" "$host" "~/Projects/$title"
+    printf '%s\t%s\t%s\n' "$title" "$title" "$command" >>"$registry"
+  done < <(jq -r '.workspaces[]? | select(.remote.enabled == false) | [.title] | @tsv' \
+    <<<"${workspaces:-{\"workspaces\":[]}}" 2>/dev/null || true)
+fi
+[[ -s $registry ]] || { printf 'cmx restore: no registered or discoverable workspaces\n' >&2; exit 1; }
+
 restored=0
 missing=0
 while IFS=$'\t' read -r session title command; do

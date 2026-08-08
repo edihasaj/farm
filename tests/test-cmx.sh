@@ -71,7 +71,7 @@ CMUX_BIN="$TMP/cmux" XDG_CONFIG_HOME="$TMP/config" CMX_TEST_LOG="$LOG" "$CMX" ap
 assert_line 'workspace' '-w selects local cmux workspace mode'
 if grep -Fq 'api-3' "$TMP/config/farm/cmx-workspaces.tsv"; then ok '-w preserves session-slot behavior'; else bad '-w preserves session-slot behavior'; fi
 
-if CMUX_BIN="$TMP/cmux" XDG_CONFIG_HOME="$TMP/empty" CMX_TEST_LOG="$LOG" "$CMX" restore >/dev/null 2>&1; then
+if CMUX_BIN="$TMP/cmux" CMX_SSH_BIN="$TMP/ssh" XDG_CONFIG_HOME="$TMP/empty" CMX_TEST_LOG="$LOG" "$CMX" restore >/dev/null 2>&1; then
   bad 'restore reports a missing registry'
 else
   ok 'restore reports a missing registry'

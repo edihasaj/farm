@@ -104,7 +104,8 @@ Studio tmux is the source of truth. cmux is a replaceable local view. `cmx -w`
 registers the view in `~/.config/farm/cmx-workspaces.tsv` and attaches cmux
 surface-resume metadata. After a cmux or laptop restart, run `cmx restore`; it
 respawns the registered terminal surfaces and reattaches the still-running tmux
-sessions without restarting their agents. A Studio reboot is different: process
+sessions without restarting their agents. On its first run it can discover
+existing local workspaces whose titles match Studio tmux sessions. A Studio reboot is different: process
 memory is gone, so use `farm-resume` / the agent's own resume command.
 
 Run `cmx setup` once on Studio. Codex and Claude prompt/stop hooks write tiny
