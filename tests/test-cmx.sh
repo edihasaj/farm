@@ -60,6 +60,7 @@ assert_line gpu-box '--workspace accepts a host override'
 assert_line backend '--workspace accepts a title override'
 assert_line --no-focus '--workspace passes native cmux flags through'
 if grep -Fq 'cd -- "$HOME"/work/api' "$LOG"; then ok '--workspace accepts a remote directory override'; else bad '--workspace accepts a remote directory override'; fi
+if grep -Fq 'tmux set-environment ZDOTDIR "${CMUX_REAL_ZDOTDIR:-$HOME}"' "$LOG"; then ok '--workspace respawns with the real zsh startup directory'; else bad '--workspace respawns with the real zsh startup directory'; fi
 
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api -w --slot 3
 assert_line mosh-tmux '-w selects native cmux transport'

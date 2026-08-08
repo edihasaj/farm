@@ -256,7 +256,7 @@ CMUX="$(find_cmux)"
 # tmux, Mosh, and cmux all terminate in sequence and cmux enters its reconnect
 # surface even though the disconnect was intentional. The deferred pane-died
 # hook respawns only the shell pane; close the cmux workspace with Cmd+Shift+W.
-bootstrap="tmux set-option -w remain-on-exit on; tmux set-hook -w pane-died 'run-shell -b \"tmux respawn-pane -k -t #{hook_pane}\"'; $(remote_cd_command "$directory")"
+bootstrap="tmux set-environment ZDOTDIR \"\${CMUX_REAL_ZDOTDIR:-\$HOME}\"; tmux set-option -w remain-on-exit on; tmux set-hook -w pane-died 'run-shell -b \"tmux respawn-pane -k -t #{hook_pane}\"'; $(remote_cd_command "$directory")"
 if [[ -z $launch_command && $directory == "~/Projects/$project" ]]; then
   bootstrap+=' 2>/dev/null || cd -- "$HOME/Projects"'
 elif [[ -n $launch_command ]]; then
