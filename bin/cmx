@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Short native-cmux companion to the traditional Ghostty/tmux `farm` command.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  cmx <project> [options]       open a named Studio mosh+tmux workspace
+  cmx restore                   manually restore the previous cmux app snapshot
+  cmx list                      list current cmux workspaces
+  cmx hooks [agent]             install cmux agent-resume hooks
+
+Project options:
+  -H, --host <ssh-alias>        remote host (default: studio)
+  -d, --dir <remote-path>       initial directory (default: ~/Projects/<project>)
+  -n, --name <title>            workspace title (default: project name)
+  -c, --command <command>       command to run after changing directory
+      --no-focus                create without switching to the workspace
+  Remaining options pass through to `cmux mosh-tmux`.
+
+Examples:
+  cmx manager
+  cmx projectx --no-focus
+  cmx api -H gpu-box -d ~/work/api
+  cmx manager -c cdx
+  cmx restore
+
+cmux restores its saved app layout automatically on normal launch. `cmx restore`
+is the manual fallback when that did not happen; do not run it after a successful
+automatic restore because it can reopen the previous snapshot again.
+EOF
+}
+
+die() {
+  printf 'cmx: %s\n' "$*" >&2
+  exit 2
+}
+
+find_cmux() {
+  if [[ -n "${CMUX_BIN:-}" ]]; then
+    printf '%s\n' "$CMUX_BIN"
+  elif command -v cmux >/dev/null 2>&1; then
+    command -v cmux
+  elif [[ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]]; then
+    printf '%s\n' /Applications/cmux.app/Contents/Resources/bin/cmux
+  else
+    die 'cmux CLI not found; install cmux in /Applications or set CMUX_BIN'
+  fi
+}
+
+remote_cd_command() {
+  local path=$1 quoted
+  case $path in
+    '~/'*)
+      printf -v quoted '%q' "${path#\~/}"
+      printf 'cd -- "$HOME"/%s' "$quoted"
+      ;;
+    *)
+      printf -v quoted '%q' "$path"
+      printf 'cd -- %s' "$quoted"
+      ;;
+  esac
+}
+
+CMUX="$(find_cmux)"
+
+case ${1:-} in
+  ''|-h|--help|help)
+    usage
+    exit 0
+    ;;
+  restore|resume)
+    shift
+    (( $# == 0 )) || die 'restore takes no arguments'
+    exec "$CMUX" restore-session
+    ;;
+  list|ls)
+    shift
+    exec "$CMUX" list-workspaces "$@"
+    ;;
+  hooks)
+    shift
+    if (( $# == 0 )); then
+      exec "$CMUX" hooks setup
+    fi
+    (( $# == 1 )) || die 'usage: cmx hooks [agent]'
+    exec "$CMUX" hooks setup "$1"
+    ;;
+esac
+
+session=''
+host=${CMX_HOST:-studio}
+directory=''
+title=''
+launch_command=''
+passthrough=()
+
+while (( $# > 0 )); do
+  case $1 in
+    -H|--host)
+      (( $# >= 2 )) || die "$1 requires a host"
+      host=$2
+      shift 2
+      ;;
+    -d|--dir)
+      (( $# >= 2 )) || die "$1 requires a path"
+      directory=$2
+      shift 2
+      ;;
+    -n|--name)
+      (( $# >= 2 )) || die "$1 requires a title"
+      title=$2
+      shift 2
+      ;;
+    -c|--command)
+      (( $# >= 2 )) || die "$1 requires a command"
+      launch_command=$2
+      shift 2
+      ;;
+    --no-focus)
+      passthrough+=("$1")
+      shift
+      ;;
+    -p|--port|-i|--identity|-o|--ssh-option|--window)
+      (( $# >= 2 )) || die "$1 requires a value"
+      passthrough+=("$1" "$2")
+      shift 2
+      ;;
+    -A|-a|--forward-agent|--no-forward-agent)
+      passthrough+=("$1")
+      shift
+      ;;
+    --)
+      shift
+      passthrough+=("$@")
+      break
+      ;;
+    -*) die "unknown option: $1" ;;
+    *)
+      [[ -z $session ]] || die "unexpected argument: $1"
+      session=$1
+      shift
+      ;;
+  esac
+done
+
+[[ -n $session ]] || die 'missing project name; run `cmx --help`'
+[[ $session =~ ^[A-Za-z0-9_-]+$ ]] || die 'project must use letters, numbers, _ or -'
+[[ -n $host ]] || die 'host cannot be empty'
+
+title=${title:-$session}
+directory=${directory:-"~/Projects/$session"}
+bootstrap="$(remote_cd_command "$directory")"
+if [[ -z $launch_command && $directory == "~/Projects/$session" ]]; then
+  bootstrap+=' 2>/dev/null || cd -- "$HOME/Projects"'
+elif [[ -n $launch_command ]]; then
+  bootstrap+=" && $launch_command"
+fi
+
+base_args=(
+  mosh-tmux "$host"
+  --session "$session"
+  --name "$title"
+  --command "$bootstrap"
+)
+if (( ${#passthrough[@]} > 0 )); then
+  exec "$CMUX" "${base_args[@]}" "${passthrough[@]}"
+fi
+exec "$CMUX" "${base_args[@]}"

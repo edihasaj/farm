@@ -28,6 +28,7 @@ shipyard <repo> <task>
 | Path | What |
 |---|---|
 | `bin/farm` | open or attach the 32-pane tmux farm grid for parallel agents. On attach it warns if the running tmux server is an older binary than the one on disk (a long-lived server keeps the binary it started with), so after a `brew upgrade tmux` you know to cycle the server — otherwise shipped fixes like the 3.6 copy-mode crash never take effect |
+| `bin/cmx` | short companion for native cmux remote workspaces: `cmx projectx` opens a named Mosh + tmux workspace on Studio; `cmx restore` manually reapplies cmux's previous app snapshot |
 | `bin/farm-view` | dashboard of repos: branch / dirty / last commit |
 | `bin/farm-tabname` | zsh snippet: name iTerm tabs by git repo |
 | `bin/farm-reflow` | reshape the grid to the client width (client-resized hook) |
@@ -63,10 +64,31 @@ export PATH="$HOME/Projects/farm/bin:$PATH"
 
 # use the farm tmux config (symlink so `git pull` keeps it current)
 ln -sfn ~/Projects/farm/config/tmux.conf ~/.tmux.conf
+ln -sfn ~/Projects/farm/bin/cmx ~/.local/bin/cmx
 ```
 
 `bin/farm*` previously lived in `~/Projects/agent-scripts/bin`; they now live
 here. Symlinks left behind there so existing PATH/muscle-memory still works.
+
+### Native cmux companion
+
+`farm` remains the traditional Ghostty/tmux grid. Native cmux-over-Studio uses
+the separate `cmx` command:
+
+```sh
+cmx projectx                   # Studio, named projectx tmux session/workspace
+cmx api --host gpu-box         # another SSH-config host
+cmx manager --no-focus         # create without switching to it
+cmx manager --command cdx      # optionally launch a command
+cmx list                       # current cmux workspaces
+cmx restore                    # manual previous-app-snapshot fallback
+cmx hooks codex                # install native Codex resume hooks
+```
+
+cmux restores windows, workspaces, panes, and its `mosh-tmux` profile on normal
+app launch. A hard remote-machine reboot cannot preserve process memory: tmux
+sessions are recreated, while supported agents resume only when cmux captured
+their session IDs through `cmux hooks setup`.
 
 ## Usage
 
