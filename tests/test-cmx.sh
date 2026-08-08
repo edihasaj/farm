@@ -61,9 +61,9 @@ assert_line backend '--workspace accepts a title override'
 assert_line --no-focus '--workspace passes native cmux flags through'
 if grep -Fq 'cd -- "$HOME"/work/api' "$LOG"; then ok '--workspace accepts a remote directory override'; else bad '--workspace accepts a remote directory override'; fi
 
-CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api --w --slot 3
-assert_line mosh-tmux '--w selects native cmux transport'
-assert_line api-3 '--w preserves session-slot behavior'
+CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api -w --slot 3
+assert_line mosh-tmux '-w selects native cmux transport'
+assert_line api-3 '-w preserves session-slot behavior'
 
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" restore
 if [[ $(cat "$LOG") == restore-session ]]; then ok 'restore maps to the native app snapshot'; else bad 'restore maps to the native app snapshot'; fi

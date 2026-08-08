@@ -79,7 +79,7 @@ terminal by default:
 cmx projectx                   # current terminal; attach/create projectx
 cmx projectx --new             # independent projectx-2 session, same directory
 cmx projectx --slot review     # explicit projectx-review session
-cmx projectx --w               # native new cmux remote workspace
+cmx projectx -w                # native new cmux remote workspace
 cmx api --host gpu-box         # current terminal, another SSH-config host
 cmx sessions                   # persistent Studio tmux sessions
 cmx list                       # native cmux workspaces
@@ -89,7 +89,7 @@ cmx hooks codex                # install native Codex resume hooks
 
 Running `cmx projectx` from multiple terminals attaches those terminals to the
 same tmux session (a mirrored view). Use `--new` or `--slot` when the terminals
-should be independent but share `~/Projects/projectx`. `--w` (also `-w` or
+should be independent but share `~/Projects/projectx`. `-w` (short for
 `--workspace`) retains the old first-class cmux behavior and participates in
 automatic app-session restore.
 
