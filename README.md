@@ -124,6 +124,14 @@ watcher also recognizes the TUI's active/idle status in the tmux pane. This
 fallback drives only the loading indicator; completion notifications remain
 hook-driven to avoid false alerts.
 
+The same prompt hook writes a short, single-line task label. The local watcher
+publishes it as the native `farm-task` cmux sidebar status while keeping the
+workspace title stable for grouping and restore. Labels are generated locally
+from the explicit thread title or latest prompt (up to nine words), then refined
+asynchronously to 3–6 words and cached. Codex tasks use the Codex CLI with
+`gpt-5.6-luna`; Claude tasks use Claude Code with `haiku`. The immediate local
+label remains when either summarizer is unavailable.
+
 Plain `cmx projectx` uses SSH by default. This enables cmux's foreground-SSH
 file handling. `--mosh` remains available for unreliable networks, but cmux file
 drop/upload is not available through Mosh. Use tmux detach (`Ctrl-b d`) to leave
