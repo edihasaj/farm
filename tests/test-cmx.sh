@@ -51,6 +51,7 @@ if grep -Fq 'session=projectx' "$LOG"; then ok 'uses the project for the primary
 assert_project_dir Projects/projectx 'starts in the project directory'
 if grep -Fq 'ZDOTDIR' "$LOG" && grep -Fq 'set-environment' "$LOG"; then ok 'loads the real zsh startup directory'; else bad 'loads the real zsh startup directory'; fi
 if grep -Fq 'remain-on-exit' "$LOG" && grep -Fq 'pane-died' "$LOG"; then ok 'lets exit close a current-terminal session'; else bad 'lets exit close a current-terminal session'; fi
+if grep -Fq 'window-size' "$LOG" && grep -Fq 'latest' "$LOG"; then ok 'resizes restored tmux windows to the current client'; else bad 'resizes restored tmux windows to the current client'; fi
 if grep -Fq 'target=' "$LOG" && grep -Fq 'attach-session' "$LOG"; then ok 'uses exact tmux session matching'; else bad 'uses exact tmux session matching'; fi
 
 CMX_TEST_SESSIONS=$'oktapod\noktapod-2' CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --new

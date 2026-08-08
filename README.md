@@ -109,6 +109,8 @@ respawns the registered terminal surfaces and reattaches the still-running tmux
 sessions without restarting their agents. On its first run it can discover
 existing local workspaces whose titles match Studio tmux sessions. A Studio reboot is different: process
 memory is gone, so use `farm-resume` / the agent's own resume command.
+Every attachment resets the tmux window from legacy `manual` sizing to `latest`,
+preventing a restored terminal from appearing as a small box surrounded by dots.
 
 Run `cmx setup` once on Studio. Codex and Claude prompt/stop hooks write tiny
 per-session state files under `~/.local/state/farm/agents/`. Each local cmux view

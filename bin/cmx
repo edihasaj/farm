@@ -258,6 +258,7 @@ attach_session() {
   remote_script+='target="=$session"; window_target="=$session:"; '
   remote_script+='if ! tmux has-session -t "$target" 2>/dev/null; then tmux new-session -d -s "$session" -c "$directory" -e ZDOTDIR="$HOME"; created=1; fi; '
   remote_script+='tmux set-environment -t "$target" ZDOTDIR "$HOME"; '
+  remote_script+='tmux set-option -w -t "$window_target" window-size latest; '
   remote_script+='tmux set-option -w -t "$window_target" remain-on-exit off; '
   remote_script+='tmux set-hook -uw -t "$window_target" pane-died 2>/dev/null || true; '
   remote_script+='if [ "$created" = 1 ] && [ -n "$launch_command" ]; then tmux send-keys -t "$window_target" "$launch_command" Enter; fi; '
