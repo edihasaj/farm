@@ -36,6 +36,9 @@ assert_line 'cd -- "$HOME"/work/api' 'accepts a remote directory override'
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" restore
 if [[ $(cat "$LOG") == restore-session ]]; then ok 'restore maps to the native app snapshot'; else bad 'restore maps to the native app snapshot'; fi
 
+CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" list
+if [[ $(paste -sd ' ' "$LOG") == 'workspace list' ]]; then ok 'list uses the current native workspace command'; else bad 'list uses the current native workspace command'; fi
+
 if CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" 'bad:name' >/dev/null 2>&1; then
   bad 'rejects invalid tmux session names'
 else

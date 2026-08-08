@@ -76,7 +76,7 @@ case ${1:-} in
     ;;
   list|ls)
     shift
-    exec "$CMUX" list-workspaces "$@"
+    exec "$CMUX" workspace list "$@"
     ;;
   hooks)
     shift
