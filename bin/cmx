@@ -37,6 +37,8 @@ Examples:
 Running the same project without --new/--slot attaches the same tmux session,
 so multiple terminals mirror it. Use --new for independent terminals that share
 one project directory. Native --workspace mode participates in cmux app restore.
+In current-terminal mode, `exit` closes the session; Ctrl-b d keeps it running.
+Close a native workspace with Cmd+Shift+W.
 EOF
 }
 
@@ -239,9 +241,10 @@ if (( native_workspace == 0 )); then
   remote_script="session=$quoted_session; directory=$quoted_directory; launch_command=$quoted_command; "
   remote_script+='case "$directory" in "~/"*) directory="$HOME/${directory#\~/}" ;; esac; '
   remote_script+='[ -d "$directory" ] || directory="$HOME/Projects"; created=0; '
-  remote_script+='if ! tmux has-session -t "$session" 2>/dev/null; then tmux new-session -d -s "$session" -c "$directory"; created=1; fi; '
-  remote_script+='tmux set-option -w -t "$session" remain-on-exit on; '
-  remote_script+='tmux set-hook -w -t "$session" pane-died '\''run-shell -b "tmux respawn-pane -k -t #{hook_pane}"'\''; '
+  remote_script+='if ! tmux has-session -t "$session" 2>/dev/null; then tmux new-session -d -s "$session" -c "$directory" -e ZDOTDIR="$HOME"; created=1; fi; '
+  remote_script+='tmux set-environment -t "$session" ZDOTDIR "$HOME"; '
+  remote_script+='tmux set-option -w -t "$session" remain-on-exit off; '
+  remote_script+='tmux set-hook -uw -t "$session" pane-died 2>/dev/null || true; '
   remote_script+='if [ "$created" = 1 ] && [ -n "$launch_command" ]; then tmux send-keys -t "$session" "$launch_command" Enter; fi; '
   remote_script+='exec tmux attach-session -t "$session"'
 

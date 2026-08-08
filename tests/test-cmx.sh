@@ -43,7 +43,8 @@ assert_line '--predict=adaptive' 'uses resilient Mosh transport'
 assert_line studio 'defaults to the Studio SSH alias'
 if grep -Fq 'session=projectx' "$LOG"; then ok 'uses the project for the primary tmux session'; else bad 'uses the project for the primary tmux session'; fi
 assert_project_dir Projects/projectx 'starts in the project directory'
-if grep -Fq 'remain-on-exit on' "$LOG" && grep -Fq 'respawn-pane -k -t #{hook_pane}' "$LOG"; then ok 'respawns an exited workspace shell'; else bad 'respawns an exited workspace shell'; fi
+if grep -Fq 'new-session -d -s "$session" -c "$directory" -e ZDOTDIR="$HOME"' "$LOG" && grep -Fq 'set-environment -t "$session" ZDOTDIR "$HOME"' "$LOG"; then ok 'loads the real zsh startup directory'; else bad 'loads the real zsh startup directory'; fi
+if grep -Fq 'remain-on-exit off' "$LOG" && grep -Fq 'set-hook -uw' "$LOG"; then ok 'lets exit close a current-terminal session'; else bad 'lets exit close a current-terminal session'; fi
 
 CMX_TEST_SESSIONS=$'oktapod\noktapod-2' CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --new
 if grep -Fq 'session=oktapod-3' "$LOG"; then ok '--new selects the next independent session'; else bad '--new selects the next independent session'; fi
@@ -61,6 +62,7 @@ assert_line backend '--workspace accepts a title override'
 assert_line --no-focus '--workspace passes native cmux flags through'
 if grep -Fq 'cd -- "$HOME"/work/api' "$LOG"; then ok '--workspace accepts a remote directory override'; else bad '--workspace accepts a remote directory override'; fi
 if grep -Fq 'tmux set-environment ZDOTDIR "${CMUX_REAL_ZDOTDIR:-$HOME}"' "$LOG"; then ok '--workspace respawns with the real zsh startup directory'; else bad '--workspace respawns with the real zsh startup directory'; fi
+if grep -Fq 'remain-on-exit on' "$LOG" && grep -Fq 'respawn-pane -k -t #{hook_pane}' "$LOG"; then ok '--workspace keeps its shell available for app restore'; else bad '--workspace keeps its shell available for app restore'; fi
 
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api -w --slot 3
 assert_line mosh-tmux '-w selects native cmux transport'

@@ -93,6 +93,11 @@ should be independent but share `~/Projects/projectx`. `-w` (short for
 `--workspace`) retains the old first-class cmux behavior and participates in
 automatic app-session restore.
 
+In current-terminal mode, `exit` closes the remote shell/session and returns to
+the local terminal. Use `Ctrl-b d` to detach while leaving the session running.
+Native `-w` workspaces keep their shell available for restore; close them with
+`Cmd+Shift+W`.
+
 cmux restores windows, workspaces, panes, and its `mosh-tmux` profile on normal
 app launch. A hard remote-machine reboot cannot preserve process memory: tmux
 sessions are recreated, while supported agents resume only when cmux captured
