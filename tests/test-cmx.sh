@@ -43,8 +43,9 @@ assert_line '--predict=adaptive' 'uses resilient Mosh transport'
 assert_line studio 'defaults to the Studio SSH alias'
 if grep -Fq 'session=projectx' "$LOG"; then ok 'uses the project for the primary tmux session'; else bad 'uses the project for the primary tmux session'; fi
 assert_project_dir Projects/projectx 'starts in the project directory'
-if grep -Fq 'new-session -d -s "$session" -c "$directory" -e ZDOTDIR="$HOME"' "$LOG" && grep -Fq 'set-environment -t "$session" ZDOTDIR "$HOME"' "$LOG"; then ok 'loads the real zsh startup directory'; else bad 'loads the real zsh startup directory'; fi
+if grep -Fq 'new-session -d -s "$session" -c "$directory" -e ZDOTDIR="$HOME"' "$LOG" && grep -Fq 'set-environment -t "$target" ZDOTDIR "$HOME"' "$LOG"; then ok 'loads the real zsh startup directory'; else bad 'loads the real zsh startup directory'; fi
 if grep -Fq 'remain-on-exit off' "$LOG" && grep -Fq 'set-hook -uw' "$LOG"; then ok 'lets exit close a current-terminal session'; else bad 'lets exit close a current-terminal session'; fi
+if grep -Fq 'target="=$session"; window_target="=$session:"' "$LOG" && grep -Fq 'attach-session -t "$target"' "$LOG"; then ok 'uses exact tmux session matching'; else bad 'uses exact tmux session matching'; fi
 
 CMX_TEST_SESSIONS=$'oktapod\noktapod-2' CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --new
 if grep -Fq 'session=oktapod-3' "$LOG"; then ok '--new selects the next independent session'; else bad '--new selects the next independent session'; fi
