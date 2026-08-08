@@ -125,8 +125,8 @@ fallback drives only the loading indicator; completion notifications remain
 hook-driven to avoid false alerts.
 
 The same prompt hook writes a short, single-line task label. The local watcher
-publishes it as the native `farm-task` cmux sidebar status while keeping the
-workspace title stable for grouping and restore. Labels are generated locally
+publishes it as the native `farm-task` cmux sidebar status and renames the
+workspace row while keeping its project group stable. Labels are generated locally
 from the explicit thread title or latest prompt (up to nine words), then refined
 asynchronously to 3–6 words and cached. Codex tasks use the Codex CLI with
 `gpt-5.6-luna`; Claude tasks use Claude Code with `haiku`. The immediate local

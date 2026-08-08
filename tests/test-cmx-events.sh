@@ -37,10 +37,14 @@ CMUX_BIN="$TMP/fake-cmux" CMX_SSH_BIN="$TMP/fake-ssh" CMX_TEST_LOG="$TMP/watch.l
   XDG_STATE_HOME="$TMP/watch-state" CMX_WATCH_INTERVAL=0.1 \
   "$ROOT/bin/cmx-watch" legacy workspace-test studio &
 watch_pid=$!
-sleep 0.4
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -f $TMP/watch.log ]] && grep -Fq 'rename-workspace' "$TMP/watch.log" && break
+  sleep 0.1
+done
 kill "$watch_pid"
 wait "$watch_pid" 2>/dev/null || true
 grep -Fq 'workspace loading on' "$TMP/watch.log"
+grep -Fq 'rename-workspace --workspace workspace-test Deploy immutable release' "$TMP/watch.log"
 grep -Fq 'set-status farm-task Deploy immutable release' "$TMP/watch.log"
 if grep -Fq 'notify' "$TMP/watch.log"; then
   printf 'stale completion unexpectedly notified\n' >&2

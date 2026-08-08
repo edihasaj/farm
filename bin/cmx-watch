@@ -44,6 +44,7 @@ while :; do
     summary=$(sed -n 's/^summary=//p' <<<"$current" | head -1)
     state=${screen_state:-$event_state}
     if [[ -n $summary ]]; then
+      "$cmux" rename-workspace --workspace "$workspace" "$summary" >/dev/null 2>&1 || true
       "$cmux" set-status farm-task "$summary" --icon text.bubble --color '#5AC8FA' \
         --priority 70 --workspace "$workspace" >/dev/null 2>&1 || true
     fi
