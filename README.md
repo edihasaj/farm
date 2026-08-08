@@ -90,6 +90,11 @@ app launch. A hard remote-machine reboot cannot preserve process memory: tmux
 sessions are recreated, while supported agents resume only when cmux captured
 their session IDs through `cmux hooks setup`.
 
+Inside a `cmx` workspace, `exit` respawns the persistent shell instead of
+terminating tmux/Mosh and entering cmux's disconnected-reconnect screen. Close
+the workspace itself with `Cmd+Shift+W`; the named tmux session remains ready
+for the next `cmx <project>` attachment.
+
 ## Usage
 
 ```sh

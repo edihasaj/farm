@@ -25,13 +25,14 @@ CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" projectx
 assert_line mosh-tmux 'uses native mosh-tmux transport'
 assert_line studio 'defaults to the Studio SSH alias'
 assert_line projectx 'uses the project for the tmux session and title'
-assert_line 'cd -- "$HOME"/Projects/projectx 2>/dev/null || cd -- "$HOME/Projects"' 'starts in the project with a safe fallback'
+if grep -Fq 'cd -- "$HOME"/Projects/projectx 2>/dev/null || cd -- "$HOME/Projects"' "$LOG"; then ok 'starts in the project with a safe fallback'; else bad 'starts in the project with a safe fallback'; fi
+if grep -Fq 'remain-on-exit on' "$LOG" && grep -Fq 'respawn-pane -k -t #{hook_pane}' "$LOG"; then ok 'respawns an exited workspace shell'; else bad 'respawns an exited workspace shell'; fi
 
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api --host gpu-box --dir '~/work/api' --name backend --no-focus
 assert_line gpu-box 'accepts a host override'
 assert_line backend 'accepts a title override'
 assert_line --no-focus 'passes native cmux flags through'
-assert_line 'cd -- "$HOME"/work/api' 'accepts a remote directory override'
+if grep -Fq 'cd -- "$HOME"/work/api' "$LOG"; then ok 'accepts a remote directory override'; else bad 'accepts a remote directory override'; fi
 
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" restore
 if [[ $(cat "$LOG") == restore-session ]]; then ok 'restore maps to the native app snapshot'; else bad 'restore maps to the native app snapshot'; fi
