@@ -286,6 +286,7 @@ attach_session() {
     transport=$(find_ssh)
     printf -v quoted_remote '%q' "$remote_script"
     "$transport" -tt -o ServerAliveInterval=20 -o ServerAliveCountMax=2 \
+      -o ControlMaster=auto -o ControlPersist=60 -o 'ControlPath=~/.ssh/cmux-%C' \
       -o RemoteCommand=none "$host" "/bin/bash -lc $quoted_remote"
   fi
 }

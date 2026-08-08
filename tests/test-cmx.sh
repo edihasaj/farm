@@ -45,6 +45,7 @@ assert_project_dir() {
 CMX_SSH_BIN="$TMP/runner" CMX_TEST_LOG="$LOG" "$CMX" projectx
 assert_line '-tt' 'uses foreground SSH transport'
 assert_line 'ServerAliveInterval=20' 'keeps SSH failures bounded'
+assert_line 'ControlMaster=auto' 'enables cmux drag-and-drop uploads'
 assert_line studio 'defaults to the Studio SSH alias'
 if grep -Fq 'session=projectx' "$LOG"; then ok 'uses the project for the primary tmux session'; else bad 'uses the project for the primary tmux session'; fi
 assert_project_dir Projects/projectx 'starts in the project directory'

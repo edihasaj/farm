@@ -95,6 +95,8 @@ should be independent but share `~/Projects/projectx`. `-w` (short for
 `--workspace`) creates a normal local cmux workspace. Its foreground SSH client
 attaches the named Studio tmux session, so image/file drop keeps cmux's ordinary
 SSH behavior without the native remote daemon.
+The connection enables a cmx-scoped SSH ControlMaster socket so cmux can upload
+dropped images/files through the existing authenticated connection.
 
 In current-terminal mode, `exit` closes the remote shell/session and returns to
 the local terminal. Use `Ctrl-b d` to detach while leaving the session running.
