@@ -30,21 +30,28 @@ bad() { FAIL=$((FAIL + 1)); printf '  FAIL: %s\n' "$1"; }
 assert_line() {
   if grep -Fxq -- "$1" "$LOG"; then ok "$2"; else bad "$2"; fi
 }
+assert_project_dir() {
+  if grep -Fq "directory=~/$1" "$LOG" || grep -Fq "directory=\\~/$1" "$LOG"; then
+    ok "$2"
+  else
+    bad "$2"
+  fi
+}
 
 CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" projectx
 assert_line '--predict=adaptive' 'uses resilient Mosh transport'
 assert_line studio 'defaults to the Studio SSH alias'
 if grep -Fq 'session=projectx' "$LOG"; then ok 'uses the project for the primary tmux session'; else bad 'uses the project for the primary tmux session'; fi
-if grep -Fq 'directory=~/Projects/projectx' "$LOG"; then ok 'starts in the project directory'; else bad 'starts in the project directory'; fi
+assert_project_dir Projects/projectx 'starts in the project directory'
 if grep -Fq 'remain-on-exit on' "$LOG" && grep -Fq 'respawn-pane -k -t #{hook_pane}' "$LOG"; then ok 'respawns an exited workspace shell'; else bad 'respawns an exited workspace shell'; fi
 
 CMX_TEST_SESSIONS=$'oktapod\noktapod-2' CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --new
 if grep -Fq 'session=oktapod-3' "$LOG"; then ok '--new selects the next independent session'; else bad '--new selects the next independent session'; fi
-if grep -Fq 'directory=~/Projects/oktapod' "$LOG"; then ok '--new keeps the original project directory'; else bad '--new keeps the original project directory'; fi
+assert_project_dir Projects/oktapod '--new keeps the original project directory'
 
 CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --slot review
 if grep -Fq 'session=oktapod-review' "$LOG"; then ok '--slot creates an explicit independent session'; else bad '--slot creates an explicit independent session'; fi
-if grep -Fq 'directory=~/Projects/oktapod' "$LOG"; then ok '--slot keeps the original project directory'; else bad '--slot keeps the original project directory'; fi
+assert_project_dir Projects/oktapod '--slot keeps the original project directory'
 
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api --workspace --slot 2 --host gpu-box --dir '~/work/api' --name backend --no-focus
 assert_line mosh-tmux '--workspace retains native cmux transport'
