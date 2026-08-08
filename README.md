@@ -28,7 +28,7 @@ shipyard <repo> <task>
 | Path | What |
 |---|---|
 | `bin/farm` | open or attach the 32-pane tmux farm grid for parallel agents. On attach it warns if the running tmux server is an older binary than the one on disk (a long-lived server keeps the binary it started with), so after a `brew upgrade tmux` you know to cycle the server — otherwise shipped fixes like the 3.6 copy-mode crash never take effect |
-| `bin/cmx` | short companion for native cmux remote workspaces: `cmx projectx` opens a named Mosh + tmux workspace on Studio; `cmx restore` manually reapplies cmux's previous app snapshot |
+| `bin/cmx` | short current-terminal Mosh + tmux companion: `cmx projectx` attaches the primary Studio session, `--new` adds an independent session for the same project, and `--workspace` opts into a native cmux remote workspace |
 | `bin/farm-view` | dashboard of repos: branch / dirty / last commit |
 | `bin/farm-tabname` | zsh snippet: name iTerm tabs by git repo |
 | `bin/farm-reflow` | reshape the grid to the client width (client-resized hook) |
@@ -70,30 +70,37 @@ ln -sfn ~/Projects/farm/bin/cmx ~/.local/bin/cmx
 `bin/farm*` previously lived in `~/Projects/agent-scripts/bin`; they now live
 here. Symlinks left behind there so existing PATH/muscle-memory still works.
 
-### Native cmux companion
+### cmx companion
 
-`farm` remains the traditional Ghostty/tmux grid. Native cmux-over-Studio uses
-the separate `cmx` command:
+`farm` remains the traditional Ghostty/tmux grid. `cmx` uses the current
+terminal by default:
 
 ```sh
-cmx projectx                   # Studio, named projectx tmux session/workspace
-cmx api --host gpu-box         # another SSH-config host
-cmx manager --no-focus         # create without switching to it
-cmx manager --command cdx      # optionally launch a command
-cmx list                       # current cmux workspaces
+cmx projectx                   # current terminal; attach/create projectx
+cmx projectx --new             # independent projectx-2 session, same directory
+cmx projectx --slot review     # explicit projectx-review session
+cmx projectx --workspace       # native new cmux remote workspace
+cmx api --host gpu-box         # current terminal, another SSH-config host
+cmx sessions                   # persistent Studio tmux sessions
+cmx list                       # native cmux workspaces
 cmx restore                    # manual previous-app-snapshot fallback
 cmx hooks codex                # install native Codex resume hooks
 ```
+
+Running `cmx projectx` from multiple terminals attaches those terminals to the
+same tmux session (a mirrored view). Use `--new` or `--slot` when the terminals
+should be independent but share `~/Projects/projectx`. `--workspace` retains the
+old first-class cmux behavior and participates in automatic app-session restore.
 
 cmux restores windows, workspaces, panes, and its `mosh-tmux` profile on normal
 app launch. A hard remote-machine reboot cannot preserve process memory: tmux
 sessions are recreated, while supported agents resume only when cmux captured
 their session IDs through `cmux hooks setup`.
 
-Inside a `cmx` workspace, `exit` respawns the persistent shell instead of
-terminating tmux/Mosh and entering cmux's disconnected-reconnect screen. Close
-the workspace itself with `Cmd+Shift+W`; the named tmux session remains ready
-for the next `cmx <project>` attachment.
+Inside a `cmx` session, `exit` respawns the persistent shell instead of
+terminating tmux/Mosh. Use tmux detach (`Ctrl-b d`) to return to the local shell.
+Close a current-terminal surface with `Cmd+W`, or a native `--workspace` with
+`Cmd+Shift+W`; the named tmux session remains ready for the next attachment.
 
 ## Usage
 

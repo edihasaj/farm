@@ -7,11 +7,21 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 LOG="$TMP/args"
-cat >"$TMP/cmux" <<'EOF'
+for binary in cmux mosh; do
+  cp /dev/null "$TMP/$binary"
+done
+cat >"$TMP/runner" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"$CMX_TEST_LOG"
 EOF
-chmod +x "$TMP/cmux"
+chmod +x "$TMP/runner"
+ln -sf "$TMP/runner" "$TMP/cmux"
+ln -sf "$TMP/runner" "$TMP/mosh"
+cat >"$TMP/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${CMX_TEST_SESSIONS:-}"
+EOF
+chmod +x "$TMP/ssh"
 
 PASS=0
 FAIL=0
@@ -21,18 +31,28 @@ assert_line() {
   if grep -Fxq -- "$1" "$LOG"; then ok "$2"; else bad "$2"; fi
 }
 
-CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" projectx
-assert_line mosh-tmux 'uses native mosh-tmux transport'
+CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" projectx
+assert_line '--predict=adaptive' 'uses resilient Mosh transport'
 assert_line studio 'defaults to the Studio SSH alias'
-assert_line projectx 'uses the project for the tmux session and title'
-if grep -Fq 'cd -- "$HOME"/Projects/projectx 2>/dev/null || cd -- "$HOME/Projects"' "$LOG"; then ok 'starts in the project with a safe fallback'; else bad 'starts in the project with a safe fallback'; fi
+if grep -Fq 'session=projectx' "$LOG"; then ok 'uses the project for the primary tmux session'; else bad 'uses the project for the primary tmux session'; fi
+if grep -Fq 'directory=~/Projects/projectx' "$LOG"; then ok 'starts in the project directory'; else bad 'starts in the project directory'; fi
 if grep -Fq 'remain-on-exit on' "$LOG" && grep -Fq 'respawn-pane -k -t #{hook_pane}' "$LOG"; then ok 'respawns an exited workspace shell'; else bad 'respawns an exited workspace shell'; fi
 
-CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api --host gpu-box --dir '~/work/api' --name backend --no-focus
-assert_line gpu-box 'accepts a host override'
-assert_line backend 'accepts a title override'
-assert_line --no-focus 'passes native cmux flags through'
-if grep -Fq 'cd -- "$HOME"/work/api' "$LOG"; then ok 'accepts a remote directory override'; else bad 'accepts a remote directory override'; fi
+CMX_TEST_SESSIONS=$'oktapod\noktapod-2' CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --new
+if grep -Fq 'session=oktapod-3' "$LOG"; then ok '--new selects the next independent session'; else bad '--new selects the next independent session'; fi
+if grep -Fq 'directory=~/Projects/oktapod' "$LOG"; then ok '--new keeps the original project directory'; else bad '--new keeps the original project directory'; fi
+
+CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --slot review
+if grep -Fq 'session=oktapod-review' "$LOG"; then ok '--slot creates an explicit independent session'; else bad '--slot creates an explicit independent session'; fi
+if grep -Fq 'directory=~/Projects/oktapod' "$LOG"; then ok '--slot keeps the original project directory'; else bad '--slot keeps the original project directory'; fi
+
+CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" api --workspace --slot 2 --host gpu-box --dir '~/work/api' --name backend --no-focus
+assert_line mosh-tmux '--workspace retains native cmux transport'
+assert_line api-2 '--workspace uses the selected session slot'
+assert_line gpu-box '--workspace accepts a host override'
+assert_line backend '--workspace accepts a title override'
+assert_line --no-focus '--workspace passes native cmux flags through'
+if grep -Fq 'cd -- "$HOME"/work/api' "$LOG"; then ok '--workspace accepts a remote directory override'; else bad '--workspace accepts a remote directory override'; fi
 
 CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" restore
 if [[ $(cat "$LOG") == restore-session ]]; then ok 'restore maps to the native app snapshot'; else bad 'restore maps to the native app snapshot'; fi
@@ -44,6 +64,12 @@ if CMUX_BIN="$TMP/cmux" CMX_TEST_LOG="$LOG" "$CMX" 'bad:name' >/dev/null 2>&1; t
   bad 'rejects invalid tmux session names'
 else
   ok 'rejects invalid tmux session names'
+fi
+
+if CMX_MOSH_BIN="$TMP/mosh" CMX_SSH_BIN="$TMP/ssh" CMX_TEST_LOG="$LOG" "$CMX" oktapod --new --slot 2 >/dev/null 2>&1; then
+  bad 'rejects ambiguous --new plus --slot'
+else
+  ok 'rejects ambiguous --new plus --slot'
 fi
 
 printf '\npassed: %s  failed: %s\n' "$PASS" "$FAIL"

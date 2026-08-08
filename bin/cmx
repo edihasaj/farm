@@ -1,33 +1,42 @@
 #!/usr/bin/env bash
-# Short native-cmux companion to the traditional Ghostty/tmux `farm` command.
+# Short Mosh+tmux companion to the traditional Ghostty/tmux `farm` command.
 set -euo pipefail
+
+CMX_VERSION=2
 
 usage() {
   cat <<'EOF'
 Usage:
-  cmx <project> [options]       open a named Studio mosh+tmux workspace
+  cmx <project> [options]       attach in the current terminal
+  cmx <project> --new           next independent session, same project
+  cmx <project> --slot <name>   explicit independent session
+  cmx <project> --workspace     create a native cmux remote workspace
   cmx restore                   manually restore the previous cmux app snapshot
   cmx list                      list current cmux workspaces
+  cmx sessions                  list persistent Studio tmux sessions
   cmx hooks [agent]             install cmux agent-resume hooks
 
 Project options:
   -H, --host <ssh-alias>        remote host (default: studio)
   -d, --dir <remote-path>       initial directory (default: ~/Projects/<project>)
-  -n, --name <title>            workspace title (default: project name)
-  -c, --command <command>       command to run after changing directory
-      --no-focus                create without switching to the workspace
-  Remaining options pass through to `cmux mosh-tmux`.
+  -s, --slot <name>             session suffix: project-<name>
+      --new                     choose the next free session automatically
+  -c, --command <command>       run only when creating a fresh tmux session
+  -w, --workspace               use a new native cmux workspace instead
+  -n, --name <title>            native workspace title
+      --no-focus                create native workspace without focusing it
 
 Examples:
-  cmx manager
-  cmx projectx --no-focus
+  cmx manager                    # current terminal, session manager
+  cmx oktapod --new              # oktapod-2, then oktapod-3, ...
+  cmx oktapod --slot review      # explicit session oktapod-review
+  cmx manager --workspace        # old native-workspace behavior
   cmx api -H gpu-box -d ~/work/api
-  cmx manager -c cdx
   cmx restore
 
-cmux restores its saved app layout automatically on normal launch. `cmx restore`
-is the manual fallback when that did not happen; do not run it after a successful
-automatic restore because it can reopen the previous snapshot again.
+Running the same project without --new/--slot attaches the same tmux session,
+so multiple terminals mirror it. Use --new for independent terminals that share
+one project directory. Native --workspace mode participates in cmux app restore.
 EOF
 }
 
@@ -48,6 +57,26 @@ find_cmux() {
   fi
 }
 
+find_mosh() {
+  if [[ -n "${CMX_MOSH_BIN:-}" ]]; then
+    printf '%s\n' "$CMX_MOSH_BIN"
+  elif command -v mosh >/dev/null 2>&1; then
+    command -v mosh
+  else
+    die 'mosh not found; install Mosh or use --workspace for cmux fallback'
+  fi
+}
+
+find_ssh() {
+  if [[ -n "${CMX_SSH_BIN:-}" ]]; then
+    printf '%s\n' "$CMX_SSH_BIN"
+  elif command -v ssh >/dev/null 2>&1; then
+    command -v ssh
+  else
+    die 'ssh not found'
+  fi
+}
+
 remote_cd_command() {
   local path=$1 quoted
   case $path in
@@ -62,24 +91,36 @@ remote_cd_command() {
   esac
 }
 
-CMUX="$(find_cmux)"
-
 case ${1:-} in
   ''|-h|--help|help)
     usage
     exit 0
     ;;
+  --version)
+    printf 'cmx %s\n' "$CMX_VERSION"
+    exit 0
+    ;;
   restore|resume)
     shift
     (( $# == 0 )) || die 'restore takes no arguments'
+    CMUX="$(find_cmux)"
     exec "$CMUX" restore-session
     ;;
   list|ls)
     shift
+    CMUX="$(find_cmux)"
     exec "$CMUX" workspace list "$@"
+    ;;
+  sessions)
+    shift
+    (( $# <= 1 )) || die 'usage: cmx sessions [host]'
+    SSH_BIN="$(find_ssh)"
+    exec "$SSH_BIN" -o RequestTTY=no -o RemoteCommand=none "${1:-${CMX_HOST:-studio}}" \
+      "tmux list-sessions -F '#{session_name}: #{session_windows} windows'"
     ;;
   hooks)
     shift
+    CMUX="$(find_cmux)"
     if (( $# == 0 )); then
       exec "$CMUX" hooks setup
     fi
@@ -88,11 +129,14 @@ case ${1:-} in
     ;;
 esac
 
-session=''
+project=''
 host=${CMX_HOST:-studio}
 directory=''
 title=''
 launch_command=''
+slot=''
+auto_new=0
+native_workspace=0
 passthrough=()
 
 while (( $# > 0 )); do
@@ -106,6 +150,19 @@ while (( $# > 0 )); do
       (( $# >= 2 )) || die "$1 requires a path"
       directory=$2
       shift 2
+      ;;
+    -s|--slot)
+      (( $# >= 2 )) || die "$1 requires a slot"
+      slot=$2
+      shift 2
+      ;;
+    --new)
+      auto_new=1
+      shift
+      ;;
+    -w|--workspace)
+      native_workspace=1
+      shift
       ;;
     -n|--name)
       (( $# >= 2 )) || die "$1 requires a title"
@@ -137,25 +194,70 @@ while (( $# > 0 )); do
       ;;
     -*) die "unknown option: $1" ;;
     *)
-      [[ -z $session ]] || die "unexpected argument: $1"
-      session=$1
+      [[ -z $project ]] || die "unexpected argument: $1"
+      project=$1
       shift
       ;;
   esac
 done
 
-[[ -n $session ]] || die 'missing project name; run `cmx --help`'
-[[ $session =~ ^[A-Za-z0-9_-]+$ ]] || die 'project must use letters, numbers, _ or -'
+[[ -n $project ]] || die 'missing project name; run `cmx --help`'
+[[ $project =~ ^[A-Za-z0-9_-]+$ ]] || die 'project must use letters, numbers, _ or -'
 [[ -n $host ]] || die 'host cannot be empty'
+[[ -z $slot || $slot =~ ^[A-Za-z0-9_-]+$ ]] || die 'slot must use letters, numbers, _ or -'
+(( auto_new == 0 )) || [[ -z $slot ]] || die 'use either --new or --slot, not both'
+
+session=$project
+if [[ -n $slot && $slot != 1 && $slot != main ]]; then
+  session="$project-$slot"
+elif (( auto_new )); then
+  SSH_BIN="$(find_ssh)"
+  existing_sessions="$("$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=8 \
+    -o RequestTTY=no -o RemoteCommand=none "$host" \
+    "tmux list-sessions -F '#{session_name}' 2>/dev/null || true")" \
+    || die "cannot list tmux sessions on $host"
+  if grep -Fxq "$project" <<<"$existing_sessions"; then
+    for candidate in $(seq 2 99); do
+      if ! grep -Fxq "$project-$candidate" <<<"$existing_sessions"; then
+        session="$project-$candidate"
+        break
+      fi
+    done
+  fi
+fi
+
+directory=${directory:-"~/Projects/$project"}
+
+if (( native_workspace == 0 )); then
+  (( ${#passthrough[@]} == 0 )) || die 'SSH/cmux flags require --workspace'
+  [[ -z $title ]] || die '--name requires --workspace'
+
+  MOSH_BIN="$(find_mosh)"
+  printf -v quoted_session '%q' "$session"
+  printf -v quoted_directory '%q' "$directory"
+  printf -v quoted_command '%q' "$launch_command"
+  remote_script="session=$quoted_session; directory=$quoted_directory; launch_command=$quoted_command; "
+  remote_script+='case "$directory" in "~/"*) directory="$HOME/${directory#\~/}" ;; esac; '
+  remote_script+='[ -d "$directory" ] || directory="$HOME/Projects"; created=0; '
+  remote_script+='if ! tmux has-session -t "$session" 2>/dev/null; then tmux new-session -d -s "$session" -c "$directory"; created=1; fi; '
+  remote_script+='tmux set-option -w -t "$session" remain-on-exit on; '
+  remote_script+='tmux set-hook -w -t "$session" pane-died '\''run-shell -b "tmux respawn-pane -k -t #{hook_pane}"'\''; '
+  remote_script+='if [ "$created" = 1 ] && [ -n "$launch_command" ]; then tmux send-keys -t "$session" "$launch_command" Enter; fi; '
+  remote_script+='exec tmux attach-session -t "$session"'
+
+  exec "$MOSH_BIN" --predict="${CMX_PREDICT:-adaptive}" \
+    --ssh="$(find_ssh) -o RequestTTY=no -o RemoteCommand=none" \
+    "$host" -- /bin/bash -lc "$remote_script"
+fi
 
 title=${title:-$session}
-directory=${directory:-"~/Projects/$session"}
+CMUX="$(find_cmux)"
 # Keep the named workspace alive when its interactive shell exits. Otherwise
 # tmux, Mosh, and cmux all terminate in sequence and cmux enters its reconnect
 # surface even though the disconnect was intentional. The deferred pane-died
 # hook respawns only the shell pane; close the cmux workspace with Cmd+Shift+W.
 bootstrap="tmux set-option -w remain-on-exit on; tmux set-hook -w pane-died 'run-shell -b \"tmux respawn-pane -k -t #{hook_pane}\"'; $(remote_cd_command "$directory")"
-if [[ -z $launch_command && $directory == "~/Projects/$session" ]]; then
+if [[ -z $launch_command && $directory == "~/Projects/$project" ]]; then
   bootstrap+=' 2>/dev/null || cd -- "$HOME/Projects"'
 elif [[ -n $launch_command ]]; then
   bootstrap+=" && $launch_command"
