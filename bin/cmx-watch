@@ -8,9 +8,24 @@ cmux=${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}
 ssh_bin=${CMX_SSH_BIN:-ssh}
 last=''
 initialized=0
+lock_root="${XDG_STATE_HOME:-$HOME/.local/state}/farm/cmx-watch"
+lock="$lock_root/$workspace"
+mkdir -p "$lock_root"
+if ! mkdir "$lock" 2>/dev/null; then
+  old_pid=$(sed -n '1p' "$lock/pid" 2>/dev/null || true)
+  if [[ -n $old_pid ]] && kill -0 "$old_pid" 2>/dev/null; then
+    exit 0
+  fi
+  rm -f "$lock/pid"
+  rmdir "$lock" 2>/dev/null || true
+  mkdir "$lock" 2>/dev/null || exit 0
+fi
+printf '%s\n' "$$" >"$lock/pid"
 
 cleanup() {
   "$cmux" workspace loading off --id farm-agent --workspace "$workspace" >/dev/null 2>&1 || true
+  rm -f "$lock/pid"
+  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
 

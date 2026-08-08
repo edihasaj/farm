@@ -115,6 +115,8 @@ per-session state files under `~/.local/state/farm/agents/`. Each local cmux vie
 polls its session state over SSH, shows the workspace loading indicator while
 the agent works, and posts a cmux notification when it stops. No code or prompt
 content is copied into those files—only state, agent name, and an event id.
+One watcher lock per workspace prevents duplicate indicators/notifications after
+repeated reattachments.
 
 Plain `cmx projectx` uses SSH by default. This enables cmux's foreground-SSH
 file handling. `--mosh` remains available for unreliable networks, but cmux file
