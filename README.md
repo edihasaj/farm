@@ -119,6 +119,10 @@ the agent works, and posts a cmux notification when it stops. No code or prompt
 content is copied into those files—only state, agent name, and an event id.
 One watcher lock per workspace prevents duplicate indicators/notifications after
 repeated reattachments.
+For Codex processes that were already running when hooks were installed, the
+watcher also recognizes the TUI's active/idle status in the tmux pane. This
+fallback drives only the loading indicator; completion notifications remain
+hook-driven to avoid false alerts.
 
 Plain `cmx projectx` uses SSH by default. This enables cmux's foreground-SSH
 file handling. `--mosh` remains available for unreliable networks, but cmux file

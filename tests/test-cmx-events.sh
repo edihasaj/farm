@@ -18,7 +18,31 @@ printf '{"hooks":{"SessionStart":[],"UserPromptSubmit":[],"Stop":[]}}\n' >"$TMP/
 cp "$TMP/home/.codex/hooks.json" "$TMP/home/.codex-work/hooks.json"
 printf '{"hooks":{}}\n' >"$TMP/home/.claude/settings.json"
 HOME="$TMP/home" "$ROOT/bin/cmx-setup" >/dev/null
+HOME="$TMP/home" "$ROOT/bin/cmx-setup" >/dev/null
 jq -e '.hooks.UserPromptSubmit[] | select(.hooks[0].command | contains("cmx-agent-event working codex"))' "$TMP/home/.codex/hooks.json" >/dev/null
 jq -e '.hooks.Stop[] | select(.hooks[0].command | contains("cmx-agent-event done claude"))' "$TMP/home/.claude/settings.json" >/dev/null
+[[ $(jq '[.hooks.UserPromptSubmit[] | select(.hooks[0].command | contains("cmx-agent-event working codex"))] | length' "$TMP/home/.codex/hooks.json") == 1 ]]
+
+cat >"$TMP/fake-ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'state=done\nagent=codex\nevent=old\nscreen=working\n'
+EOF
+cat >"$TMP/fake-cmux" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CMX_TEST_LOG"
+EOF
+chmod +x "$TMP/fake-ssh" "$TMP/fake-cmux"
+CMUX_BIN="$TMP/fake-cmux" CMX_SSH_BIN="$TMP/fake-ssh" CMX_TEST_LOG="$TMP/watch.log" \
+  XDG_STATE_HOME="$TMP/watch-state" CMX_WATCH_INTERVAL=0.1 \
+  "$ROOT/bin/cmx-watch" legacy workspace-test studio &
+watch_pid=$!
+sleep 0.4
+kill "$watch_pid"
+wait "$watch_pid" 2>/dev/null || true
+grep -Fq 'workspace loading on' "$TMP/watch.log"
+if grep -Fq 'notify' "$TMP/watch.log"; then
+  printf 'stale completion unexpectedly notified\n' >&2
+  exit 1
+fi
 
 printf 'cmx event tests passed\n'

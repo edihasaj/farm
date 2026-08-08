@@ -8,6 +8,7 @@ cmux=${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}
 ssh_bin=${CMX_SSH_BIN:-ssh}
 last=''
 initialized=0
+last_event=''
 lock_root="${XDG_STATE_HOME:-$HOME/.local/state}/farm/cmx-watch"
 lock="$lock_root/$workspace"
 mkdir -p "$lock_root"
@@ -34,19 +35,23 @@ while :; do
   printf -v quoted_session '%q' "$session"
   current=$("$ssh_bin" -o BatchMode=yes -o ConnectTimeout=4 -o RequestTTY=no \
     -o RemoteCommand=none "$host" \
-    "file=\"\${XDG_STATE_HOME:-\$HOME/.local/state}/farm/agents/$quoted_session\"; test ! -r \"\$file\" || cat \"\$file\"" 2>/dev/null || true)
+    "file=\"\${XDG_STATE_HOME:-\$HOME/.local/state}/farm/agents/$quoted_session\"; test ! -r \"\$file\" || cat \"\$file\"; screen=\$(tmux capture-pane -p -t '=$quoted_session:' -S -12 2>/dev/null || true); if grep -Eq 'Pursuing goal|esc to interrupt|background terminal running' <<<\"\$screen\"; then echo screen=working; elif grep -Eq 'Goal achieved|Worked for' <<<\"\$screen\"; then echo screen=idle; fi" 2>/dev/null || true)
   if [[ -n $current && $current != "$last" ]]; then
-    state=$(sed -n 's/^state=//p' <<<"$current" | head -1)
+    event_state=$(sed -n 's/^state=//p' <<<"$current" | head -1)
+    event=$(sed -n 's/^event=//p' <<<"$current" | head -1)
+    screen_state=$(sed -n 's/^screen=//p' <<<"$current" | head -1)
     agent=$(sed -n 's/^agent=//p' <<<"$current" | head -1)
+    state=${screen_state:-$event_state}
     if [[ $state == working ]]; then
       "$cmux" workspace loading on --id farm-agent --workspace "$workspace" >/dev/null 2>&1 || true
     else
       "$cmux" workspace loading off --id farm-agent --workspace "$workspace" >/dev/null 2>&1 || true
-      if (( initialized )) && [[ $state == "done" ]]; then
+      if (( initialized )) && [[ $event_state == "done" && -n $event && $event != "$last_event" ]]; then
         "$cmux" notify --workspace "$workspace" --title "${agent:-Agent}" \
           --body "$session finished" >/dev/null 2>&1 || true
       fi
     fi
+    [[ -z $event ]] || last_event=$event
     last=$current
     initialized=1
   elif (( initialized == 0 )); then

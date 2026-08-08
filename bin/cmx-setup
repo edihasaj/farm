@@ -11,9 +11,10 @@ install_codex() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/cmx-hooks.XXXXXX")
   jq --arg event "$event" '
     def farm($state): {hooks:[{type:"command", command:($event + " " + $state + " codex"), timeout:10}]};
-    .hooks.SessionStart = ((.hooks.SessionStart // []) | map(select((.hooks[0].command // "") | contains("cmux codex-hook") | not)) + [farm("idle")]) |
-    .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) | map(select((.hooks[0].command // "") | contains("cmux codex-hook") | not)) + [farm("working")]) |
-    .hooks.Stop = ((.hooks.Stop // []) | map(select((.hooks[0].command // "") | contains("cmux codex-hook") | not)) + [farm("done")])
+    def without_cmx: map(select((.hooks[0].command // "") as $command | (($command | contains("cmux codex-hook")) or ($command | contains("/cmx-agent-event "))) | not));
+    .hooks.SessionStart = ((.hooks.SessionStart // []) | without_cmx + [farm("idle")]) |
+    .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) | without_cmx + [farm("working")]) |
+    .hooks.Stop = ((.hooks.Stop // []) | without_cmx + [farm("done")])
   ' "$file" >"$tmp"
   chmod --reference="$file" "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$file"
