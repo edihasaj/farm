@@ -34,7 +34,7 @@ check() { # check <desc> <expected> <actual>
 count() { ls -1 "$FARM_HOME/queue/$1" 2>/dev/null | wc -l | tr -d ' '; }
 
 echo "— add / validate —"
-ID1="$("$QCMD" add demo "small thing" use ../agent-scripts tooling)"
+ID1="$("$QCMD" add demo "small thing" use ../agent tooling)"
 check "add returns an id" 0 $?
 check "pending has 1" 1 "$(count pending)"
 ID2="$("$QCMD" add arbitrary "shipyard resolves this")" \
