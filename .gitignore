@@ -10,3 +10,5 @@ queue/
 control/
 repos/
 sandbox/
+runs/
+worktrees/
