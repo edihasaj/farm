@@ -28,9 +28,6 @@ shipyard <repo> <task>
 | Path | What |
 |---|---|
 | `bin/farm` | open or attach the 32-pane tmux farm grid for parallel agents. On attach it warns if the running tmux server is an older binary than the one on disk (a long-lived server keeps the binary it started with), so after a `brew upgrade tmux` you know to cycle the server — otherwise shipped fixes like the 3.6 copy-mode crash never take effect |
-| `bin/cmx` | short SSH + tmux companion: `cmx projectx` attaches the primary Studio session, `--new` adds an independent session, and `-w` creates a grouped local cmux view |
-| `bin/cmx-agent-event` / `bin/cmx-watch` | bridge Codex/Claude lifecycle hooks on Studio to local cmux running indicators and completion notifications |
-| `bin/cmx-restore` | reattach all registered local cmux workspaces after cmux or the laptop restarts |
 | `bin/farm-view` | dashboard of repos: branch / dirty / last commit |
 | `bin/farm-tabname` | zsh snippet: name iTerm tabs by git repo |
 | `bin/farm-reflow` | reshape the grid to the client width (client-resized hook) |
@@ -66,76 +63,14 @@ export PATH="$HOME/Projects/farm/bin:$PATH"
 
 # use the farm tmux config (symlink so `git pull` keeps it current)
 ln -sfn ~/Projects/farm/config/tmux.conf ~/.tmux.conf
-ln -sfn ~/Projects/farm/bin/cmx ~/.local/bin/cmx
 ```
 
 `bin/farm*` previously lived in `~/Projects/agent-scripts/bin`; they now live
 here. Symlinks left behind there so existing PATH/muscle-memory still works.
 
-### cmx companion
-
-`farm` remains the traditional Ghostty/tmux grid. `cmx` uses the current
-terminal by default:
-
-```sh
-cmx projectx                   # current terminal; attach/create projectx
-cmx projectx --new             # independent projectx-2 session, same directory
-cmx projectx --slot review     # explicit projectx-review session
-cmx projectx -w                # grouped local cmux view -> SSH -> Studio tmux
-cmx api --host gpu-box         # current terminal, another SSH-config host
-cmx sessions                   # persistent Studio tmux sessions
-cmx list                       # native cmux workspaces
-cmx restore                    # reattach all registered views after restart
-cmx setup                      # install Codex + Claude state hooks on Studio
-```
-
-Running `cmx projectx` from multiple terminals attaches those terminals to the
-same tmux session (a mirrored view). Use `--new` or `--slot` when the terminals
-should be independent but share `~/Projects/projectx`. `-w` (short for
-`--workspace`) creates a normal local cmux workspace. Its foreground SSH client
-attaches the named Studio tmux session, so image/file drop keeps cmux's ordinary
-SSH behavior without the native remote daemon.
-The connection enables a cmx-scoped SSH ControlMaster socket so cmux can upload
-dropped images/files through the existing authenticated connection.
-
-In current-terminal mode, `exit` closes the remote shell/session and returns to
-the local terminal. Use `Ctrl-b d` to detach while leaving the session running.
-Close a `-w` workspace with `Cmd+Shift+W`; the Studio tmux session remains.
-
-Studio tmux is the source of truth. cmux is a replaceable local view. `cmx -w`
-registers the view in `~/.config/farm/cmx-workspaces.tsv` and attaches cmux
-surface-resume metadata. After a cmux or laptop restart, run `cmx restore`; it
-respawns the registered terminal surfaces and reattaches the still-running tmux
-sessions without restarting their agents. On its first run it can discover
-existing local workspaces whose titles match Studio tmux sessions. A Studio reboot is different: process
-memory is gone, so use `farm-resume` / the agent's own resume command.
-Every attachment resets the tmux window from legacy `manual` sizing to `latest`,
-preventing a restored terminal from appearing as a small box surrounded by dots.
-
-Run `cmx setup` once on Studio. Codex and Claude prompt/stop hooks write tiny
-per-session state files under `~/.local/state/farm/agents/`. Each local cmux view
-polls its session state over SSH, shows the workspace loading indicator while
-the agent works, and posts a cmux notification when it stops. No code or prompt
-content is copied into those files—only state, agent name, and an event id.
-One watcher lock per workspace prevents duplicate indicators/notifications after
-repeated reattachments.
-For Codex processes that were already running when hooks were installed, the
-watcher also recognizes the TUI's active/idle status in the tmux pane. This
-fallback drives only the loading indicator; completion notifications remain
-hook-driven to avoid false alerts.
-
-The same prompt hook writes a short, single-line task label. The local watcher
-publishes it as the native `farm-task` cmux sidebar status and renames the
-workspace row while keeping its project group stable. Labels are generated locally
-from the explicit thread title or latest prompt (up to nine words), then refined
-asynchronously to 3–6 words and cached. Codex tasks use the Codex CLI with
-`gpt-5.6-luna`; Claude tasks use Claude Code with `haiku`. The immediate local
-label remains when either summarizer is unavailable.
-
-Plain `cmx projectx` uses SSH by default. This enables cmux's foreground-SSH
-file handling. `--mosh` remains available for unreliable networks, but cmux file
-drop/upload is not available through Mosh. Use tmux detach (`Ctrl-b d`) to leave
-the remote process running.
+Run `farm` for the default four tabs of eight panes. If an idle existing farm
+has been truncated, `farm` repairs it to the full 32 panes even when resume
+commands were already staged; shape repair never stages them twice.
 
 ## Usage
 

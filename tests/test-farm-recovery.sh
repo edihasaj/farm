@@ -78,6 +78,16 @@ run_farm
 [ ! -s "$STAGE_LOG" ] && ok "second bare farm does not re-stage resumes" \
   || bad "idempotency: resumes were re-staged (log: $(cat "$STAGE_LOG"))"
 
+# --- Test 3: an already-resumed but later-truncated idle farm still repairs ---
+restore_six
+tmux set-option -t "$SESSION" @farm_resumed 1
+: > "$STAGE_LOG"
+run_farm
+[ "$(panes)" = "32" ] && ok "already-resumed truncated farm repairs to 32 panes" \
+  || bad "shape repair: expected 32 panes, got $(panes)"
+[ ! -s "$STAGE_LOG" ] && ok "shape repair does not re-stage resumes" \
+  || bad "shape repair re-staged resumes (log: $(cat "$STAGE_LOG"))"
+
 echo
 echo "recovery tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
