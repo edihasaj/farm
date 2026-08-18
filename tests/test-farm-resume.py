@@ -157,23 +157,27 @@ def test_no_gap_uses_newest_only():
 
 
 def test_account_resume_cmd():
-    """resume_cmd re-adds the `--work` flag for work-account sessions."""
+    """resume_cmd re-applies the account: `--work` for claude, CODEX_HOME for codex."""
     cwd = os.path.join(fr.HOME, "Projects", "x")
-    check("acct: codex --work placed after binary",
-          fr.resume_cmd("codex", cwd, OKTAPOD, None, "work")
-          == f"cd ~/Projects/x && codex --work resume {OKTAPOD}")
+    check("acct: codex secondary carries CODEX_HOME",
+          fr.resume_cmd("codex", cwd, OKTAPOD, None, "secondary")
+          == f"cd ~/Projects/x && CODEX_HOME=$HOME/.codex-secondary codex resume {OKTAPOD}")
+    check("acct: codex primary carries CODEX_HOME",
+          fr.resume_cmd("codex", cwd, OKTAPOD, None, "primary")
+          == f"cd ~/Projects/x && CODEX_HOME=$HOME/.codex-primary codex resume {OKTAPOD}")
     check("acct: claude --work placed after binary",
           fr.resume_cmd("claude", cwd, WHISPER, None, "work")
           == f"cd ~/Projects/x && claude --work --resume {WHISPER}")
-    check("acct: default account has no --work",
-          "--work" not in fr.resume_cmd("codex", cwd, OKTAPOD, None, None))
+    check("acct: default codex account has no CODEX_HOME",
+          "CODEX_HOME" not in fr.resume_cmd("codex", cwd, OKTAPOD, None, None))
 
 
 def test_scan_tags_work_account():
-    """A codex session whose log lives under ~/.codex-work is tagged 'work' and
-    its resume command carries --work — the account that used to go missing."""
+    """A codex session whose log lives under ~/.codex-secondary is tagged
+    'secondary' and its resume command pins CODEX_HOME — the account that used
+    to go missing."""
     with tempfile.TemporaryDirectory() as home:
-        wdir = os.path.join(home, ".codex-work/sessions/2026/06/28")
+        wdir = os.path.join(home, ".codex-secondary/sessions/2026/06/28")
         os.makedirs(wdir)
         proj = os.path.join(home, "Projects/secret")
         os.makedirs(proj)
@@ -186,7 +190,7 @@ def test_scan_tags_work_account():
         fr.CLAUDE_PROJECT_DIRS = [(os.path.join(home, ".claude/projects"), None)]
         fr.CODEX_SESSION_DIRS = [
             (os.path.join(home, ".codex/sessions"), None),
-            (os.path.join(home, ".codex-work/sessions"), "work"),
+            (os.path.join(home, ".codex-secondary/sessions"), "secondary"),
         ]
         fr.RESURRECT_DIRS = (os.path.join(home, "no-such-dir"),)
         try:
@@ -195,12 +199,43 @@ def test_scan_tags_work_account():
             (fr.HOME, fr.CLAUDE_PROJECT_DIRS, fr.CODEX_SESSION_DIRS,
              fr.RESURRECT_DIRS) = saved
         rec = [r for r in sessions if r[3] == OKTAPOD]
-        check("scan: work-account session found", len(rec) == 1)
+        check("scan: secondary-account session found", len(rec) == 1)
         if rec:
-            check("scan: tagged as work account", rec[0][6] == "work")
-            check("scan: resume cmd carries --work",
-                  "codex --work resume" in
+            check("scan: tagged as secondary account", rec[0][6] == "secondary")
+            check("scan: resume cmd pins CODEX_HOME",
+                  "CODEX_HOME=$HOME/.codex-secondary codex resume" in
                   fr.resume_cmd(rec[0][1], rec[0][2], rec[0][3], rec[0][5], rec[0][6]))
+
+
+def test_scan_dedupes_cloned_codex_home():
+    """~/.codex can be a clone of ~/.codex-primary: the same rollout must not be
+    offered twice under two different account tags."""
+    with tempfile.TemporaryDirectory() as home:
+        proj = os.path.join(home, "Projects/cloned")
+        os.makedirs(proj)
+        name = f"rollout-2026-06-28T00-00-00-{OKTAPOD}.jsonl"
+        for profile in (".codex", ".codex-primary"):
+            d = os.path.join(home, profile, "sessions/2026/06/28")
+            os.makedirs(d)
+            with open(os.path.join(d, name), "w") as f:
+                f.write(json.dumps({"cwd": proj}) + "\n")
+        saved = (fr.HOME, fr.CLAUDE_PROJECT_DIRS, fr.CODEX_SESSION_DIRS,
+                 fr.RESURRECT_DIRS)
+        fr.HOME = home
+        fr.CLAUDE_PROJECT_DIRS = [(os.path.join(home, ".claude/projects"), None)]
+        fr.CODEX_SESSION_DIRS = [
+            (os.path.join(home, ".codex/sessions"), None),
+            (os.path.join(home, ".codex-primary/sessions"), "primary"),
+        ]
+        fr.RESURRECT_DIRS = (os.path.join(home, "no-such-dir"),)
+        try:
+            sessions = fr.scan(72)
+        finally:
+            (fr.HOME, fr.CLAUDE_PROJECT_DIRS, fr.CODEX_SESSION_DIRS,
+             fr.RESURRECT_DIRS) = saved
+        check("clone: rollout offered once",
+              len([r for r in sessions if r[3] == OKTAPOD]) == 1)
+
 
 
 def test_scan_skips_trashed_project():
@@ -238,6 +273,7 @@ test_parse()
 test_parse_fresh_agent()
 test_account_resume_cmd()
 test_scan_tags_work_account()
+test_scan_dedupes_cloned_codex_home()
 test_scan_skips_trashed_project()
 test_gap_recovers_idle()
 test_no_gap_uses_newest_only()

@@ -37,15 +37,19 @@ CODEX_DIR = f"{HOME}/.codex/sessions"
 RESURRECT_DIRS = (f"{HOME}/.local/share/tmux/resurrect", f"{HOME}/.tmux/resurrect")
 SHELLS = {"zsh", "-zsh", "bash", "-bash", "fish", "sh", "-sh"}
 
-# Account routing: `--work`/`--second` runs the agent against an alternate home
-# (claude -> CLAUDE_CONFIG_DIR=~/.claude-work, codex -> CODEX_HOME=~/.codex-work),
-# each with its OWN sessions store. The shell function consumes `--work` as env, so
-# it never reaches the resurrect pane command — the home a session log lives under
-# is the only signal of which account it was. We scan both homes, tag every session
-# with its account, and resume_cmd re-adds `--work` so a work session comes back on
-# the work account instead of silently dropping to the default one.
+# Account routing: each account has its OWN sessions store under its own home
+# (claude -> CLAUDE_CONFIG_DIR=~/.claude-work via the `--work` shell function,
+# codex -> CODEX_HOME=~/.codex-primary | ~/.codex-secondary). The home a session
+# log lives under is the only signal of which account it was, so we scan every
+# home, tag each session with its account, and resume_cmd re-applies that account
+# (a `--work` flag for claude, an explicit CODEX_HOME for codex) instead of
+# silently dropping the session onto the default account.
 CLAUDE_PROJECT_DIRS = [(CLAUDE_DIR, None), (f"{HOME}/.claude-work/projects", "work")]
-CODEX_SESSION_DIRS = [(CODEX_DIR, None), (f"{HOME}/.codex-work/sessions", "work")]
+# ~/.codex is scanned first and may be a clone of ~/.codex-primary; duplicate
+# rollout ids are skipped below so a cloned session is not offered twice.
+CODEX_SESSION_DIRS = [(CODEX_DIR, None),
+                      (f"{HOME}/.codex-primary/sessions", "primary"),
+                      (f"{HOME}/.codex-secondary/sessions", "secondary")]
 
 # A session whose cwd got moved into the Trash was deliberately closed — resuming it
 # means `cd ~/.Trash/<proj> && resume`, which after a reboot silently drags dead
@@ -302,6 +306,7 @@ def scan(since_hours):
             if mt >= cutoff:
                 found.append((mt, "claude", cwd, sid, _first_user_task(p), p, account))
 
+    codex_seen = set()
     for base_dir, account in CODEX_SESSION_DIRS:
         for p in glob.glob(f"{base_dir}/*/*/*/*.jsonl"):
             try:
@@ -314,6 +319,9 @@ def scan(since_hours):
             stem = base[:-6]
             parts = stem.split("-")
             sid = "-".join(parts[-5:]) if len(parts) >= 5 else stem
+            if sid in codex_seen:
+                continue  # same rollout seen in a cloned home
+            codex_seen.add(sid)
             by_sid[sid] = (mt, "codex", cwd, p, account)
             _note_cwd("codex", cwd, mt, sid, p, account)
             if mt >= cutoff:
@@ -427,10 +435,10 @@ def _claude_permission_mode(path):
 
 def resume_cmd(tool, cwd, sid, path=None, account=None):
     short = cwd.replace(HOME, "~")
-    # `--work` is the cld/cdx shell-function flag that routes to the alternate
-    # account home; place it right after the binary so the function consumes it.
-    acct = " --work" if account == "work" else ""
     if tool == "claude":
+        # `--work` is the claude shell-function flag that routes to the alternate
+        # account home; place it right after the binary so the function consumes it.
+        acct = " --work" if account == "work" else ""
         cmd = f"cd {short} && claude{acct} --resume {sid}"
         mode = _claude_permission_mode(path) if path else None
         if mode == "bypassPermissions":
@@ -438,7 +446,10 @@ def resume_cmd(tool, cwd, sid, path=None, account=None):
         elif mode and mode != "default":
             cmd += f" --permission-mode {mode}"
         return cmd
-    cmd = f"cd {short} && codex{acct} resume {sid}"
+    # codex has no account flag: the profile home is selected by CODEX_HOME, and
+    # `codex resume` only finds a session inside the home that recorded it.
+    prefix = f"CODEX_HOME=$HOME/.codex-{account} " if account in ("primary", "secondary") else ""
+    cmd = f"cd {short} && {prefix}codex resume {sid}"
     if path:
         model, effort = _codex_model_effort(path)
         if model:
